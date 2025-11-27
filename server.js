@@ -10,7 +10,7 @@ const io = require('socket.io')(server, {
 });
 const path = require('path');
 
-// --- ส่วน Socket.io (เหมือนเดิม) ---
+// --- ส่วน Socket.io ---
 io.on('connection', socket => {
   console.log('New socket connection:', socket.id);
   socket.on('join-room', (roomId, userId) => {
@@ -22,11 +22,13 @@ io.on('connection', socket => {
   });
 });
 
-// --- ส่วนใหม่: เสิร์ฟหน้าเว็บ React ---
+// --- ส่วนเสิร์ฟหน้าเว็บ React ---
+// ให้ Express อ่านไฟล์ Static ในโฟลเดอร์ dist
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// *** จุดที่แก้ไข: เปลี่ยน * เป็น /(.*) เพื่อแก้ PathError ***
-app.get('/(.*)', (req, res) => {
+// *** จุดสำคัญที่แก้ไข ***
+// ใช้ app.use แบบไม่ระบุ Path เพื่อดักทุก Request ที่เหลือส่งไปหน้า React
+app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
