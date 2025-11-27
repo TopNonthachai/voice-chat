@@ -1,0 +1,7 @@
+{
+  "name": "VoiceCord - Peer-to-Peer Voice Chat",
+  "description": "A Discord-like real-time voice chat application using WebRTC and Socket.io. Features creating rooms, joining via ID, and multi-user voice conferencing.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
