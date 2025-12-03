@@ -13,28 +13,33 @@ const path = require('path');
 // 1. ประกาศตัวแปรเก็บสถานะ (ต้องอยู่นอก io.on)
 const roomVideoStates = {}; 
 const roomAudioStates = {}; // เก็บสถานะ Audio Bot
+const roomUsers = {}; // [ใหม่] ตัวแปรเก็บชื่อคนในห้อง { roomId: { userId: "Name" } }
 
 // --- ส่วน Socket.io ---
 io.on('connection', socket => {
     console.log('New socket connection:', socket.id);
 
     // เมื่อ User เข้าห้อง
-    socket.on('join-room', (roomId, userId) => {
+    socket.on('join-room', (roomId, userId, userName) => {
         socket.join(roomId);
-        socket.to(roomId).emit('user-connected', userId);
 
-        // ส่งสถานะ Youtube ล่าสุดให้คนที่เพิ่งเข้า
-        if (roomVideoStates[roomId]) {
-            socket.emit('youtube-sync-state', roomVideoStates[roomId]);
-        }
+        // 1. บันทึกชื่อคนใหม่ลงในห้อง
+        if (!roomUsers[roomId]) roomUsers[roomId] = {};
+        roomUsers[roomId][userId] = userName;
 
-        // ส่งสถานะ Audio ล่าสุดให้คนที่เพิ่งเข้า
-        if (roomAudioStates[roomId]) {
-            socket.emit('audio-sync-state', roomAudioStates[roomId]);
-        }
+        // 2. บอกคนอื่นในห้องว่า "มีคนใหม่มา ชื่อ..." (ส่งไปทั้งก้อน object)
+        socket.to(roomId).emit('user-connected', { userId, userName });
 
-        // เมื่อ User ตัดสาย/ปิดเว็บ
+        // 3. [สำคัญ] บอกคนใหม่ว่า "ในห้องมีใครอยู่บ้างและชื่ออะไร"
+        socket.emit('existing-users', roomUsers[roomId]);
+
+        // ... (ส่วน Youtube/Audio Sync เดิม ปล่อยไว้) ...
+        if (roomVideoStates[roomId]) socket.emit('youtube-sync-state', roomVideoStates[roomId]);
+        if (roomAudioStates[roomId]) socket.emit('audio-sync-state', roomAudioStates[roomId]);
+
         socket.on('disconnect', () => {
+            // ลบชื่อออกเมื่อหลุด
+            if (roomUsers[roomId]) delete roomUsers[roomId][userId];
             socket.to(roomId).emit('user-disconnected', userId);
         });
     });

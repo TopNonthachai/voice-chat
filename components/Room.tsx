@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
@@ -19,8 +19,12 @@ interface PeerUser {
 const Room: React.FC = () => {
     const { roomId } = useParams<{ roomId: string }>();
     const navigate = useNavigate();
+    const location = useLocation();
+    // รับชื่อจากหน้าแรก
+    const myName = location.state?.userName || 'Guest';
     
     // State
+    const [peerNames, setPeerNames] = useState<{[key: string]: string}>({});
     const [myStream, setMyStream] = useState<MediaStream | null>(null);
     const [peers, setPeers] = useState<PeerUser[]>([]);
     const [isMuted, setIsMuted] = useState(false);
@@ -30,13 +34,16 @@ const Room: React.FC = () => {
     const [socketUrl, setSocketUrl] = useState(DEFAULT_SOCKET_URL);
     const [isReconnecting, setIsReconnecting] = useState(false);
 
-    // Refs for cleanup and access inside callbacks
+    // Refs
     const socketRef = useRef<Socket | null>(null);
     const peerRef = useRef<Peer | null>(null);
-    const peersMapRef = useRef<Map<string, any>>(new Map()); // Keep track of Call objects
+    const peersMapRef = useRef<Map<string, any>>(new Map());
     const myStreamRef = useRef<MediaStream | null>(null);
-    const [showYoutube, setShowYoutube] = useState(false); // เปลี่ยน default เป็น false จะได้ไม่รก
-    const [showAudio, setShowAudio] = useState(false);     // State สำหรับ Audio Bot
+    
+    // ตั้งค่า Default เป็น true เพื่อให้โชว์ Bot เลย
+    const [showYoutube, setShowYoutube] = useState(true); 
+    const [showAudio, setShowAudio] = useState(true);
+
     // Initialize Room
     useEffect(() => {
         let mounted = true;
@@ -44,12 +51,13 @@ const Room: React.FC = () => {
         let newPeer: Peer | null = null;
         let localStream: MediaStream | null = null;
 
+        // *** ลบบรรทัดที่เคยผิดตรงนี้ออกแล้ว ***
+
     const init = async () => {
       try {
         setConnectionError(false);
         
         // 1. Get User Media
-        // Only request if we don't have it yet to avoid permission spam on re-renders/retries
         if (!myStreamRef.current) {
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({
@@ -74,7 +82,6 @@ const Room: React.FC = () => {
         console.log(`Attempting to connect to ${socketUrl}...`);
         
         newSocket = io(socketUrl, {
-            // Force WebSocket to avoid CORS/Mixed Content issues with XHR polling
             transports: ['websocket'], 
             reconnectionAttempts: 3,
             timeout: 5000,
@@ -105,7 +112,6 @@ const Room: React.FC = () => {
         });
 
         // 3. Initialize PeerJS
-        // We only initialize PeerJS once we have a stream, but it's independent of Socket
         if (!peerRef.current) {
             newPeer = new Peer();
             peerRef.current = newPeer;
@@ -114,10 +120,8 @@ const Room: React.FC = () => {
               if (mounted) setUserId(id);
             });
 
-            // Handle incoming calls (When someone else calls ME)
             newPeer.on('call', (call) => {
-              call.answer(localStream!); // Answer with my stream
-              
+              call.answer(localStream!);
               call.on('stream', (userVideoStream) => {
                 if (mounted) addPeerStream(call.peer, userVideoStream);
               });
@@ -131,16 +135,20 @@ const Room: React.FC = () => {
         }
 
         // Socket Events - User Connections
-        newSocket.on('user-connected', (newUserId: string) => {
-            console.log('User connected:', newUserId);
-            // Allow a small delay for the other user's Peer to be fully ready on the signaling server
+        newSocket.on('user-connected', ({ userId, userName }: { userId: string, userName: string }) => {
+            // จดจำชื่อเพื่อนที่เข้ามาใหม่
+            setPeerNames(prev => ({ ...prev, [userId]: userName }));
             setTimeout(() => {
-                if (mounted && newPeer && localStream) connectToNewUser(newUserId, localStream, newPeer);
+                if (mounted && newPeer && localStream) connectToNewUser(userId, localStream, newPeer);
             }, 1000);
         });
 
+        // รับรายชื่อคนที่มีอยู่แล้ว
+        newSocket.on('existing-users', (users: {[key: string]: string}) => {
+            setPeerNames(prev => ({ ...prev, ...users }));
+        });
+
         newSocket.on('user-disconnected', (disconnectedUserId: string) => {
-            console.log('User disconnected:', disconnectedUserId);
             if (mounted) {
                 removePeerStream(disconnectedUserId);
                 if (peersMapRef.current.has(disconnectedUserId)) {
@@ -159,8 +167,6 @@ const Room: React.FC = () => {
 
     return () => {
         mounted = false;
-        // Note: We intentionally don't destroy PeerJS here to avoid ID churning on re-renders, 
-        // but we do disconnect Socket to handle URL changes.
         if (newSocket) {
             newSocket.disconnect();
             newSocket.removeAllListeners();
@@ -172,34 +178,25 @@ const Room: React.FC = () => {
     useEffect(() => {
         if (socketConnected && userId && roomId && socketRef.current) {
             console.log(`Joining room ${roomId} as ${userId}`);
-            socketRef.current.emit('join-room', roomId, userId);
+            // *** แก้ไข: ส่ง myName ไปด้วย ***
+            socketRef.current.emit('join-room', roomId, userId, myName);
         }
     }, [socketConnected, userId, roomId]);
 
-    // Helper: Call a new user
+    // Helper Functions
     const connectToNewUser = (otherUserId: string, stream: MediaStream, peer: Peer) => {
-    // Call the new user
-    const call = peer.call(otherUserId, stream);
-    
-    // When they answer, we get their stream
-    call.on('stream', (userVideoStream) => {
-      addPeerStream(otherUserId, userVideoStream);
-    });
-
-    call.on('close', () => {
-      removePeerStream(otherUserId);
-    });
-
-    call.on('error', (e) => {
-        console.error("Call error:", e);
-    });
-
-    peersMapRef.current.set(otherUserId, call);
+        const call = peer.call(otherUserId, stream);
+        call.on('stream', (userVideoStream) => {
+            addPeerStream(otherUserId, userVideoStream);
+        });
+        call.on('close', () => {
+            removePeerStream(otherUserId);
+        });
+        peersMapRef.current.set(otherUserId, call);
     };
 
     const addPeerStream = (id: string, stream: MediaStream) => {
         setPeers(prev => {
-            // Avoid duplicates
             if (prev.find(p => p.userId === id)) return prev;
             return [...prev, { userId: id, stream }];
         });
@@ -220,7 +217,6 @@ const Room: React.FC = () => {
     };
 
     const leaveRoom = () => {
-        // Stop tracks
         if (myStreamRef.current) {
             myStreamRef.current.getTracks().forEach(track => track.stop());
         }
@@ -238,46 +234,22 @@ const Room: React.FC = () => {
 
     const handleRetryConnection = (newUrl?: string) => {
         if (newUrl) setSocketUrl(newUrl);
-        setIsReconnecting(prev => !prev); // Trigger effect
+        setIsReconnecting(prev => !prev);
     };
 
+    // Error UI
     if (connectionError) {
         return (
-            <div className="flex flex-col items-center justify-center h-screen bg-discord-darker text-white p-6 text-center">
+             <div className="flex flex-col items-center justify-center h-screen bg-discord-darker text-white p-6 text-center">
                 <i className="fas fa-satellite-dish text-6xl text-discord-danger mb-6 animate-pulse"></i>
                 <h2 className="text-2xl font-bold mb-2">Connection Failed</h2>
-                <p className="mb-4 text-discord-muted max-w-md">
-                    Could not connect to the signaling server at <code className="bg-black/30 px-1 rounded">{socketUrl}</code>.
-                </p>
-                
                 <div className="w-full max-w-sm bg-discord-dark p-6 rounded-lg shadow-lg border border-discord-light mb-6">
-                    <label className="block text-left text-xs font-bold text-discord-muted uppercase mb-2">
-                        Signaling Server URL
-                    </label>
-                    <div className="flex space-x-2">
-                        <input 
-                            type="text" 
-                            value={socketUrl} 
-                            onChange={(e) => setSocketUrl(e.target.value)}
-                            className="flex-1 bg-discord-darkest border border-discord-light rounded p-2 text-white text-sm"
-                        />
-                        <button 
-                            onClick={() => handleRetryConnection()}
-                            className="bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded font-medium transition"
-                        >
-                            Retry
-                        </button>
-                    </div>
-                </div>
-
-                <div className="bg-discord-dark p-4 rounded text-left text-sm text-discord-text max-w-lg border border-discord-light">
-                    <p className="mb-2 font-bold text-yellow-500"><i className="fas fa-exclamation-triangle mr-1"></i> Troubleshooting:</p>
-                    <ul className="list-disc list-inside space-y-1 text-xs">
-                        <li>Ensure your Node.js server is running (<code className="bg-black/30 px-1 rounded">npm start</code>).</li>
-                        <li>If using an online preview (HTTPS), you might need a tunnel (like ngrok) to expose your local server to the internet.</li>
-                        <li>Paste the <strong>ngrok</strong> or public URL above if applicable.</li>
-                        <li>If running locally, ensure the port matches (default 3001).</li>
-                    </ul>
+                    <button 
+                        onClick={() => handleRetryConnection()}
+                        className="w-full bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded font-medium transition"
+                    >
+                        Retry Connection
+                    </button>
                 </div>
             </div>
         )
@@ -301,7 +273,6 @@ const Room: React.FC = () => {
                     <button
                         onClick={copyRoomId}
                         className="bg-discord-primary hover:bg-blue-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center"
-                        title="Copy Room ID"
                     >
                         <i className="fas fa-copy sm:mr-2"></i>
                         <span className="hidden sm:inline">Copy ID</span>
@@ -309,7 +280,6 @@ const Room: React.FC = () => {
                     <button
                         onClick={leaveRoom}
                         className="bg-discord-danger hover:bg-red-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center"
-                        title="Disconnect"
                     >
                         <i className="fas fa-phone-slash sm:mr-2"></i>
                         <span className="hidden sm:inline">Disconnect</span>
@@ -320,7 +290,7 @@ const Room: React.FC = () => {
             {/* Main Content */}
             <main className="flex-1 p-6 overflow-y-auto">
 
-                {/* --- [ย้ายมาไว้ตรงนี้] แผงควบคุม Bot (อยู่นอก Grid) --- */}
+                {/* แผงควบคุม Bot */}
                 <div className="flex justify-center gap-3 mb-6">
                     {!showYoutube && (
                         <button
@@ -340,7 +310,7 @@ const Room: React.FC = () => {
                     )}
                 </div>
 
-                {/* --- [ย้ายมาไว้ตรงนี้] พื้นที่แสดงผล Bot --- */}
+                {/* พื้นที่แสดงผล Bot */}
                 <div className="flex flex-col items-center w-full gap-6 mb-8">
                     {showYoutube && (
                         <div className="w-full max-w-4xl animate-fade-in-down">
@@ -363,7 +333,7 @@ const Room: React.FC = () => {
                     )}
                 </div>
 
-                {/* --- Grid ของ User (My Card + Peers) --- */}
+                {/* Grid ของ User */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
 
                     {/* My Card */}
@@ -380,13 +350,12 @@ const Room: React.FC = () => {
                                 className="w-20 h-20 rounded-full border-4 border-discord-darker z-10"
                             />
                         </div>
-                        <div className="font-semibold text-white mb-1">You</div>
+                        {/* *** แก้ไข: แสดงชื่อเรา *** */}
+                        <div className="font-semibold text-white mb-1">{myName} (You)</div>
                         <div className="flex items-center space-x-2 text-xs text-discord-muted">
                             {isMuted ? <i className="fas fa-microphone-slash text-discord-danger"></i> : <i className="fas fa-microphone text-discord-success"></i>}
                             <span>{isMuted ? 'Muted' : 'Connected'}</span>
                         </div>
-
-                        {/* Controls Overlay */}
                         <div className="absolute bottom-4 right-4 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
                             <button
                                 onClick={toggleMute}
@@ -419,7 +388,10 @@ const Room: React.FC = () => {
                                     }}
                                 />
                             </div>
-                            <div className="font-semibold text-white mb-1 truncate w-full text-center">User {peer.userId.substr(0, 5)}...</div>
+                            {/* *** แก้ไข: แสดงชื่อเพื่อน (ถ้าไม่มีชื่อให้โชว์ Guest) *** */}
+                            <div className="font-semibold text-white mb-1 truncate w-full text-center">
+                                {peerNames[peer.userId] || 'Guest'}
+                            </div>
                             <div className="text-xs text-discord-success flex items-center">
                                 <i className="fas fa-signal mr-1"></i> Live
                             </div>
