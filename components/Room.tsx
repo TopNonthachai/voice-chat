@@ -41,8 +41,8 @@ const Room: React.FC = () => {
     const myStreamRef = useRef<MediaStream | null>(null);
     
     // ตั้งค่า Default เป็น true เพื่อให้โชว์ Bot เลย
-    const [showYoutube, setShowYoutube] = useState(true); 
-    const [showAudio, setShowAudio] = useState(true);
+    const [showYoutube, setShowYoutube] = useState(false); 
+    const [showAudio, setShowAudio] = useState(false);
 
     // Initialize Room
     useEffect(() => {

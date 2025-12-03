@@ -39,6 +39,19 @@ const Landing: React.FC = () => {
                 <p className="text-discord-muted">Your place to talk. Create a room and hang out.</p>
                 </div>
 
+                <div className="mb-4">
+                    <label className="block text-xs font-bold text-discord-muted uppercase mb-2">
+                        Your Name
+                    </label>
+                    <input
+                        type="text"
+                        value={userName}
+                        onChange={(e) => setUserName(e.target.value)}
+                        placeholder="Enter your name"
+                        className="w-full bg-discord-darkest border border-transparent focus:border-discord-primary text-white rounded p-3 outline-none transition-colors"
+                    />
+                </div>
+
                 <div className="space-y-6">
                 <button
                     onClick={createRoom}
