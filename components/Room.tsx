@@ -3,6 +3,8 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
+import YoutubeBot from './YoutubeBot';
+import AudioBot from './AudioBot';
 
 // กำหนด URL ของ Socket Server
 const getSocketUrl = () => {
@@ -28,6 +30,8 @@ const Room: React.FC = () => {
     const [isMuted, setIsMuted] = useState(false);
     const [userId, setUserId] = useState<string>('');
     const [socketConnected, setSocketConnected] = useState(false);
+    const [showYoutube, setShowYoutube] = useState(false);
+    const [showAudioBot, setShowAudioBot] = useState(false);
 
     const socketRef = useRef<Socket | null>(null);
     const peerRef = useRef<Peer | null>(null);
@@ -59,7 +63,18 @@ const Room: React.FC = () => {
                 });
 
                 // 3. เชื่อมต่อ PeerJS
-                const peer = new Peer();
+                const peer = new Peer({
+                    config: {
+                        iceServers: [
+                            { urls: 'stun:stun.l.google.com:19302' },
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                            { urls: 'stun:stun2.l.google.com:19302' },
+                            { urls: 'stun:stun3.l.google.com:19302' },
+                            { urls: 'stun:stun4.l.google.com:19302' },
+                        ],
+                        iceCandidatePoolSize: 10,
+                    }
+                });
                 peerRef.current = peer;
 
                 peer.on('open', (id) => {
@@ -170,6 +185,12 @@ const Room: React.FC = () => {
                     </div>
                 </div>
                 <div className="flex space-x-2">
+                    <button onClick={() => setShowYoutube(!showYoutube)} className={`px-4 py-2 rounded text-sm font-medium transition ${showYoutube ? 'bg-red-600 text-white' : 'bg-discord-dark hover:bg-gray-700 text-gray-300 border border-gray-600'}`}>
+                        <i className="fab fa-youtube mr-2"></i> Youtube
+                    </button>
+                    <button onClick={() => setShowAudioBot(!showAudioBot)} className={`px-4 py-2 rounded text-sm font-medium transition ${showAudioBot ? 'bg-indigo-600 text-white' : 'bg-discord-dark hover:bg-gray-700 text-gray-300 border border-gray-600'}`}>
+                        <i className="fas fa-music mr-2"></i> Music
+                    </button>
                     <button onClick={copyRoomId} className="bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium transition">
                         Copy ID
                     </button>
@@ -180,7 +201,25 @@ const Room: React.FC = () => {
             </header>
 
             <main className="flex-1 p-6 overflow-y-auto">
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                <div className="flex flex-col items-center">
+                    {showYoutube && (
+                        <YoutubeBot 
+                            socket={socketRef.current} 
+                            roomId={roomId || ''} 
+                            onClose={() => setShowYoutube(false)} 
+                        />
+                    )}
+                    
+                    {showAudioBot && (
+                        <AudioBot 
+                            socket={socketRef.current} 
+                            roomId={roomId || ''} 
+                            onClose={() => setShowAudioBot(false)} 
+                        />
+                    )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mt-4">
                     {/* My Card */}
                     <div className="bg-discord-darker rounded-lg p-4 flex flex-col items-center justify-center relative border border-discord-darkest aspect-video">
                         <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-4 ${isMuted ? 'bg-discord-danger' : 'bg-discord-success'} relative overflow-hidden ring-4 ring-discord-darkest`}>

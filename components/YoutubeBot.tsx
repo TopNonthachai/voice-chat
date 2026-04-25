@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useRef } from 'react';
-import ReactPlayer from 'react-player/youtube'; 
+import ReactPlayer from 'react-player'; 
 import { Socket } from 'socket.io-client';
+
+const ReactPlayerAny = ReactPlayer as any;
 
 interface YoutubeBotProps {
     socket: Socket | null;
@@ -127,7 +129,7 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
                 className="bg-black rounded overflow-hidden relative group border-2 border-red-500" 
                 style={{ width: '100%', height: '360px' }}
             >
-                <ReactPlayer
+                <ReactPlayerAny
                     ref={playerRef}
                     url={url}
                     playing={playing}
@@ -140,7 +142,7 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
                     }}
                     onPlay={() => emitChange(true)}
                     onPause={() => emitChange(false)}
-                    onError={(e) => console.error("❌ [YoutubeBot] Error:", e)}
+                    onError={(e: any) => console.error("❌ [YoutubeBot] Error:", e)}
                 />
             </div>
 
