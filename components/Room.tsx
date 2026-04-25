@@ -3,131 +3,151 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
-import YoutubeBot from './YoutubeBot';
-import AudioBot from './AudioBot';
 
-    // Initial Configuration
-    const getSocketUrl = () => {
-        if (window.location.hostname === 'localhost') return 'http://localhost:3001';
-        return window.location.origin; // บน Render ควรใช้ origin เดียวกัน
-    };
+// Initial Configuration
+const getSocketUrl = () => {
+    if (window.location.hostname === 'localhost') return 'http://localhost:3001';
+    return window.location.origin;
+};
 
+interface PeerUser {
+  userId: string;
+  stream: MediaStream;
+}
+
+const Room: React.FC = () => {
+    const { roomId } = useParams<{ roomId: string }>();
+    const navigate = useNavigate();
+    const location = useLocation();
+    const myName = location.state?.userName || 'Guest';
     const socketUrl = getSocketUrl();
+    
+    // State
+    const [peerNames, setPeerNames] = useState<{[key: string]: string}>({});
+    const [myStream, setMyStream] = useState<MediaStream | null>(null);
+    const [peers, setPeers] = useState<PeerUser[]>([]);
+    const [isMuted, setIsMuted] = useState(false);
+    const [userId, setUserId] = useState<string>('');
+    const [socketConnected, setSocketConnected] = useState(false);
 
-    // ... (ส่วนอื่นๆ ใน Room.tsx) ...
+    // Refs
+    const socketRef = useRef<Socket | null>(null);
+    const peerRef = useRef<Peer | null>(null);
+    const peersMapRef = useRef<Map<string, any>>(new Map());
+    const myStreamRef = useRef<MediaStream | null>(null);
 
+    // Main Initialization Effect
     useEffect(() => {
         let mounted = true;
-        
+
         const init = async () => {
-            // ... (getUserMedia logic) ...
-            
-            console.log(`📡 Connecting to Socket at: ${socketUrl}`);
-            const newSocket = io(socketUrl, {
-                transports: ['websocket', 'polling'], // เพิ่ม polling เพื่อความชัวร์ถ้า websocket โดนบล็อก
-                reconnection: true,
-                reconnectionAttempts: 10
-            });
-            socketRef.current = newSocket;
-
-            newSocket.on('connect', () => {
-                console.log("✅ Socket Connected! ID:", newSocket.id);
-                if (mounted) setSocketConnected(true);
-            });
-
-            newSocket.on('connect_error', (err) => {
-                console.error("❌ Socket Connection Error:", err.message);
-            });
-            
-            // ... (PeerJS logic) ...
-        };
-        init();
-    }, []);
-
-        // 3. Initialize PeerJS
-        if (!peerRef.current) {
-            newPeer = new Peer();
-            peerRef.current = newPeer;
-
-            newPeer.on('open', (id) => {
-              if (mounted) setUserId(id);
-            });
-
-            newPeer.on('call', (call) => {
-              call.answer(localStream!);
-              call.on('stream', (userVideoStream) => {
-                if (mounted) addPeerStream(call.peer, userVideoStream);
-              });
-            });
-
-            newPeer.on('error', (err) => {
-                console.error("PeerJS error:", err);
-            });
-        } else {
-            newPeer = peerRef.current;
-        }
-
-        // Socket Events - User Connections
-        newSocket.on('user-connected', ({ userId, userName }: { userId: string, userName: string }) => {
-            // จดจำชื่อเพื่อนที่เข้ามาใหม่
-            setPeerNames(prev => ({ ...prev, [userId]: userName }));
-            setTimeout(() => {
-                if (mounted && newPeer && localStream) connectToNewUser(userId, localStream, newPeer);
-            }, 1000);
-        });
-
-        // รับรายชื่อคนที่มีอยู่แล้ว
-        newSocket.on('existing-users', (users: {[key: string]: string}) => {
-            setPeerNames(prev => ({ ...prev, ...users }));
-        });
-
-        newSocket.on('user-disconnected', (disconnectedUserId: string) => {
-            if (mounted) {
-                removePeerStream(disconnectedUserId);
-                if (peersMapRef.current.has(disconnectedUserId)) {
-                    peersMapRef.current.get(disconnectedUserId).close();
-                    peersMapRef.current.delete(disconnectedUserId);
+            try {
+                // 1. Get User Media
+                if (!myStreamRef.current) {
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: false,
+                        audio: true,
+                    });
+                    if (mounted) {
+                        setMyStream(stream);
+                        myStreamRef.current = stream;
+                    }
                 }
+
+                const localStream = myStreamRef.current;
+                if (!localStream || !mounted) return;
+
+                // 2. Initialize Socket
+                console.log(`📡 Connecting to Socket at: ${socketUrl}`);
+                const newSocket = io(socketUrl, {
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionAttempts: 10
+                });
+                socketRef.current = newSocket;
+
+                newSocket.on('connect', () => {
+                    console.log("✅ Socket Connected! ID:", newSocket.id);
+                    if (mounted) setSocketConnected(true);
+                });
+
+                // 3. Initialize PeerJS
+                const newPeer = new Peer();
+                peerRef.current = newPeer;
+
+                newPeer.on('open', (id) => {
+                    console.log("🆔 Peer ID opened:", id);
+                    if (mounted) setUserId(id);
+                });
+
+                newPeer.on('call', (call) => {
+                    console.log("📞 Incoming call from:", call.peer);
+                    call.answer(localStream);
+                    call.on('stream', (userVideoStream) => {
+                        if (mounted) addPeerStream(call.peer, userVideoStream);
+                    });
+                });
+
+                // Socket Event Listeners
+                newSocket.on('user-connected', ({ userId: otherUserId, userName }: { userId: string, userName: string }) => {
+                    console.log("👤 User connected:", userName, otherUserId);
+                    setPeerNames(prev => ({ ...prev, [otherUserId]: userName }));
+                    
+                    // Call the new user
+                    setTimeout(() => {
+                        if (mounted && peerRef.current) {
+                            console.log("📞 Calling user:", otherUserId);
+                            const call = peerRef.current.call(otherUserId, localStream);
+                            call.on('stream', (userVideoStream) => {
+                                addPeerStream(otherUserId, userVideoStream);
+                            });
+                            call.on('close', () => {
+                                removePeerStream(otherUserId);
+                            });
+                            peersMapRef.current.set(otherUserId, call);
+                        }
+                    }, 1000);
+                });
+
+                newSocket.on('existing-users', (users: {[key: string]: string}) => {
+                    console.log("👥 Existing users in room:", users);
+                    setPeerNames(prev => ({ ...prev, ...users }));
+                });
+
+                newSocket.on('user-disconnected', (disconnectedUserId: string) => {
+                    console.log("🚫 User disconnected:", disconnectedUserId);
+                    if (mounted) {
+                        removePeerStream(disconnectedUserId);
+                        if (peersMapRef.current.has(disconnectedUserId)) {
+                            peersMapRef.current.get(disconnectedUserId).close();
+                            peersMapRef.current.delete(disconnectedUserId);
+                        }
+                    }
+                });
+
+            } catch (err) {
+                console.error("❌ Initialization error:", err);
             }
-        });
-
-      } catch (err) {
-        console.error("Initialization error", err);
-      }
-    };
-
-    init();
-
-    return () => {
-        mounted = false;
-        if (newSocket) {
-            newSocket.disconnect();
-            newSocket.removeAllListeners();
-        }
         };
-    }, [roomId, socketUrl, isReconnecting]);
 
-    // Separate effect to handle joining the room once both ID and Socket are ready
+        init();
+
+        return () => {
+            mounted = false;
+            if (socketRef.current) socketRef.current.disconnect();
+            if (peerRef.current) peerRef.current.destroy();
+        };
+    }, [roomId, socketUrl]);
+
+    // Room Joining Effect
     useEffect(() => {
         if (socketConnected && userId && roomId && socketRef.current) {
-            console.log(`Joining room ${roomId} as ${userId}`);
-            // *** แก้ไข: ส่ง myName ไปด้วย ***
+            console.log(`🚀 Joining room ${roomId} as ${userId} (${myName})`);
             socketRef.current.emit('join-room', roomId, userId, myName);
         }
-    }, [socketConnected, userId, roomId]);
+    }, [socketConnected, userId, roomId, myName]);
 
     // Helper Functions
-    const connectToNewUser = (otherUserId: string, stream: MediaStream, peer: Peer) => {
-        const call = peer.call(otherUserId, stream);
-        call.on('stream', (userVideoStream) => {
-            addPeerStream(otherUserId, userVideoStream);
-        });
-        call.on('close', () => {
-            removePeerStream(otherUserId);
-        });
-        peersMapRef.current.set(otherUserId, call);
-    };
-
     const addPeerStream = (id: string, stream: MediaStream) => {
         setPeers(prev => {
             if (prev.find(p => p.userId === id)) return prev;
@@ -165,29 +185,6 @@ import AudioBot from './AudioBot';
         }
     };
 
-    const handleRetryConnection = (newUrl?: string) => {
-        if (newUrl) setSocketUrl(newUrl);
-        setIsReconnecting(prev => !prev);
-    };
-
-    // Error UI
-    if (connectionError) {
-        return (
-             <div className="flex flex-col items-center justify-center h-screen bg-discord-darker text-white p-6 text-center">
-                <i className="fas fa-satellite-dish text-6xl text-discord-danger mb-6 animate-pulse"></i>
-                <h2 className="text-2xl font-bold mb-2">Connection Failed</h2>
-                <div className="w-full max-w-sm bg-discord-dark p-6 rounded-lg shadow-lg border border-discord-light mb-6">
-                    <button 
-                        onClick={() => handleRetryConnection()}
-                        className="w-full bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded font-medium transition"
-                    >
-                        Retry Connection
-                    </button>
-                </div>
-            </div>
-        )
-    }
-
     return (
         <div className="flex flex-col h-screen bg-discord-dark">
             {/* Header */}
@@ -203,17 +200,11 @@ import AudioBot from './AudioBot';
                     </div>
                 </div>
                 <div className="flex space-x-2 sm:space-x-4">
-                    <button
-                        onClick={copyRoomId}
-                        className="bg-discord-primary hover:bg-blue-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center"
-                    >
+                    <button onClick={copyRoomId} className="bg-discord-primary hover:bg-blue-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center">
                         <i className="fas fa-copy sm:mr-2"></i>
                         <span className="hidden sm:inline">Copy ID</span>
                     </button>
-                    <button
-                        onClick={leaveRoom}
-                        className="bg-discord-danger hover:bg-red-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center"
-                    >
+                    <button onClick={leaveRoom} className="bg-discord-danger hover:bg-red-600 text-white px-3 py-1.5 sm:px-4 sm:py-2 rounded text-sm font-medium transition flex items-center">
                         <i className="fas fa-phone-slash sm:mr-2"></i>
                         <span className="hidden sm:inline">Disconnect</span>
                     </button>
@@ -222,79 +213,24 @@ import AudioBot from './AudioBot';
 
             {/* Main Content */}
             <main className="flex-1 p-6 overflow-y-auto">
-
-                {/* แผงควบคุม Bot */}
-                <div className="flex justify-center gap-3 mb-6">
-                    {!showYoutube && (
-                        <button
-                            onClick={() => setShowYoutube(true)}
-                            className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg flex items-center shadow transition text-sm font-bold transform hover:scale-105"
-                        >
-                            <i className="fab fa-youtube mr-2"></i> Open Video Player
-                        </button>
-                    )}
-                    {!showAudio && (
-                        <button
-                            onClick={() => setShowAudio(true)}
-                            className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg flex items-center shadow transition text-sm font-bold transform hover:scale-105"
-                        >
-                            <i className="fas fa-music mr-2"></i> Open Music Player
-                        </button>
-                    )}
-                </div>
-
-                {/* พื้นที่แสดงผล Bot */}
-                <div className="flex flex-col items-center w-full gap-6 mb-8">
-                    {showYoutube && (
-                        <div className="w-full max-w-4xl animate-fade-in-down">
-                            <YoutubeBot
-                                socket={socketRef.current}
-                                roomId={roomId || ''}
-                                onClose={() => setShowYoutube(false)}
-                            />
-                        </div>
-                    )}
-
-                    {showAudio && (
-                        <div className="w-full max-w-md animate-fade-in-down">
-                            <AudioBot
-                                socket={socketRef.current}
-                                roomId={roomId || ''}
-                                onClose={() => setShowAudio(false)}
-                            />
-                        </div>
-                    )}
-                </div>
-
-                {/* Grid ของ User */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-
                     {/* My Card */}
                     <div className="bg-discord-darker rounded-lg p-4 flex flex-col items-center justify-center relative border border-discord-darkest shadow-sm aspect-video group">
                         <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-4 ${isMuted ? 'bg-discord-danger' : 'bg-discord-success'} relative overflow-hidden ring-4 ring-discord-darkest`}>
-                            {myStream ? (
+                            {myStream && (
                                 <div className="absolute inset-0 opacity-50">
                                     <AudioVisualizer stream={myStream} isMuted={isMuted} height={96} />
                                 </div>
-                            ) : null}
-                            <img
-                                src={`https://picsum.photos/seed/${userId || 'me'}/200`}
-                                alt="Me"
-                                className="w-20 h-20 rounded-full border-4 border-discord-darker z-10"
-                            />
+                            )}
+                            <img src={`https://picsum.photos/seed/${userId || 'me'}/200`} alt="Me" className="w-20 h-20 rounded-full border-4 border-discord-darker z-10" />
                         </div>
-                        {/* *** แก้ไข: แสดงชื่อเรา *** */}
                         <div className="font-semibold text-white mb-1">{myName} (You)</div>
                         <div className="flex items-center space-x-2 text-xs text-discord-muted">
                             {isMuted ? <i className="fas fa-microphone-slash text-discord-danger"></i> : <i className="fas fa-microphone text-discord-success"></i>}
                             <span>{isMuted ? 'Muted' : 'Connected'}</span>
                         </div>
                         <div className="absolute bottom-4 right-4 opacity-100 sm:opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                                onClick={toggleMute}
-                                className={`w-10 h-10 rounded-full flex items-center justify-center transition shadow-lg ${isMuted ? 'bg-white text-discord-danger' : 'bg-discord-dark text-white hover:bg-discord-light'}`}
-                                title={isMuted ? "Unmute" : "Mute"}
-                            >
+                            <button onClick={toggleMute} className={`w-10 h-10 rounded-full flex items-center justify-center transition shadow-lg ${isMuted ? 'bg-white text-discord-danger' : 'bg-discord-dark text-white hover:bg-discord-light'}`}>
                                 <i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`}></i>
                             </button>
                         </div>
@@ -307,24 +243,10 @@ import AudioBot from './AudioBot';
                                 <div className="absolute inset-0 opacity-50">
                                     <AudioVisualizer stream={peer.stream} isMuted={false} height={96} />
                                 </div>
-                                <img
-                                    src={`https://picsum.photos/seed/${peer.userId}/200`}
-                                    alt="Peer"
-                                    className="w-20 h-20 rounded-full border-4 border-discord-darker z-10"
-                                />
-                                <audio
-                                    ref={(audio) => {
-                                        if (audio) {
-                                            audio.srcObject = peer.stream;
-                                            audio.play().catch(e => console.error("Auto-play prevented", e));
-                                        }
-                                    }}
-                                />
+                                <img src={`https://picsum.photos/seed/${peer.userId}/200`} alt="Peer" className="w-20 h-20 rounded-full border-4 border-discord-darker z-10" />
+                                <audio ref={(audio) => { if (audio) { audio.srcObject = peer.stream; audio.play().catch(e => console.error("Auto-play prevented", e)); } }} />
                             </div>
-                            {/* *** แก้ไข: แสดงชื่อเพื่อน (ถ้าไม่มีชื่อให้โชว์ Guest) *** */}
-                            <div className="font-semibold text-white mb-1 truncate w-full text-center">
-                                {peerNames[peer.userId] || 'Guest'}
-                            </div>
+                            <div className="font-semibold text-white mb-1 truncate w-full text-center">{peerNames[peer.userId] || 'Guest'}</div>
                             <div className="text-xs text-discord-success flex items-center">
                                 <i className="fas fa-signal mr-1"></i> Live
                             </div>
@@ -346,9 +268,7 @@ import AudioBot from './AudioBot';
                 <div className="flex items-center space-x-2">
                     <span className="font-mono bg-discord-dark px-1 rounded">{roomId}</span>
                 </div>
-                <div>
-                    {peers.length + 1} User{peers.length + 1 !== 1 ? 's' : ''} in room
-                </div>
+                <div>{peers.length + 1} User{peers.length + 1 !== 1 ? 's' : ''} in room</div>
             </footer>
         </div>
     );
