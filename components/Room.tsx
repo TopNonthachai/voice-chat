@@ -73,7 +73,8 @@ const Room: React.FC = () => {
                             { urls: 'stun:stun4.l.google.com:19302' },
                         ],
                         iceCandidatePoolSize: 10,
-                    }
+                    },
+                    debug: 3 // เพิ่ม Debug Level ของ PeerJS
                 });
                 peerRef.current = peer;
 
@@ -83,28 +84,48 @@ const Room: React.FC = () => {
                 });
 
                 peer.on('call', (call) => {
-                    console.log("📞 Receiving call from:", call.peer);
+                    console.log("📞 [Incoming Call] from:", call.peer);
                     call.answer(stream);
+                    
                     call.on('stream', (remoteStream) => {
+                        console.log("🔊 [Stream Received] from:", call.peer, "Tracks:", remoteStream.getAudioTracks().length);
                         if (mounted) addPeerStream(call.peer, remoteStream);
                     });
+
+                    call.on('error', (err) => {
+                        console.error("❌ [Call Error] with:", call.peer, err);
+                    });
+                });
+
+                peer.on('error', (err) => {
+                    console.error("❌ [PeerJS Error]:", err.type, err);
                 });
 
                 // 4. ฟังเหตุการณ์จาก Socket
                 socket.on('user-connected', ({ userId: otherId, userName }: { userId: string, userName: string }) => {
-                    console.log("👤 User Joined:", userName);
+                    console.log("👤 [Socket] User Joined:", userName, "(ID:", otherId, ")");
                     setPeerNames(prev => ({ ...prev, [otherId]: userName }));
                     
                     // หน่วงเวลาเล็กน้อยเพื่อให้ Peer ปลายทางพร้อมรับสาย
                     setTimeout(() => {
                         if (peerRef.current && mounted) {
+                            console.log("📡 [Outgoing Call] Calling:", otherId);
                             const call = peerRef.current.call(otherId, stream);
-                            call.on('stream', (remoteStream) => {
-                                addPeerStream(otherId, remoteStream);
-                            });
-                            peersMapRef.current.set(otherId, call);
+                            
+                            if (call) {
+                                call.on('stream', (remoteStream) => {
+                                    console.log("🔊 [Outgoing Stream Received] from:", otherId);
+                                    addPeerStream(otherId, remoteStream);
+                                });
+
+                                call.on('error', (err) => {
+                                    console.error("❌ [Outgoing Call Error]:", err);
+                                });
+
+                                peersMapRef.current.set(otherId, call);
+                            }
                         }
-                    }, 1500);
+                    }, 2000);
                 });
 
                 socket.on('existing-users', (users: {[key: string]: string}) => {

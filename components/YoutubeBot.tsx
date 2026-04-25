@@ -26,6 +26,13 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
     const playerRef = useRef<any>(null);
     const isRemoteUpdate = useRef(false);
 
+    // ฟังก์ชันช่วยดึง Video ID จาก URL ของ YouTube
+    const getYouTubeID = (url: string) => {
+        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+        const match = url.match(regExp);
+        return (match && match[2].length === 11) ? match[2] : url;
+    };
+
     useEffect(() => {
         if (!socket) {
             console.warn("⚠️ [YoutubeBot] No socket connection");
@@ -33,13 +40,21 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
         }
 
         const handleUpdate = (state: VideoState) => {
-            console.log("📥 [YoutubeBot] Received update:", state);
-            if (state.url === url && state.playing === playing) return;
+            const currentID = getYouTubeID(url);
+            const incomingID = getYouTubeID(state.url);
+
+            console.log(`📥 [YoutubeBot] Update: CurrentID=${currentID}, IncomingID=${incomingID}, Playing=${state.playing}`);
+            
+            // ถ้าเป็น Video เดียวกันและสถานะเดียวกัน ไม่ต้องทำอะไร
+            if (currentID === incomingID && state.playing === playing) {
+                console.log("⏭️ [YoutubeBot] Skip update: No change");
+                return;
+            }
 
             isRemoteUpdate.current = true;
             
-            if (state.url !== url) {
-                console.log("📥 [Socket] URL changed -> Reloading");
+            if (currentID !== incomingID) {
+                console.log("📥 [YoutubeBot] New Video detected -> Changing URL");
                 setUrl(state.url);
                 setPlaying(state.playing);
             } else {
@@ -49,7 +64,8 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
             if (playerRef.current && state.played > 0) {
                 const currentTime = playerRef.current.getCurrentTime();
                 const diff = Math.abs(currentTime - state.played);
-                if (diff > 3) {
+                if (diff > 5) { // เพิ่ม Threshold กันการกระตุก
+                    console.log(`📡 [YoutubeBot] Syncing Time: diff=${diff.toFixed(2)}s`);
                     playerRef.current.seekTo(state.played, 'seconds');
                 }
             }
@@ -70,7 +86,7 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
         if (isRemoteUpdate.current || !socket) return;
         
         const played = playerRef.current ? playerRef.current.getCurrentTime() : 0;
-        console.log(`📤 [YoutubeBot] Emitting change: Playing=${newPlaying}, at=${played}`);
+        console.log(`📤 [YoutubeBot] Emitting: Playing=${newPlaying}, ID=${getYouTubeID(url)}`);
         
         const state: VideoState = {
             url,
