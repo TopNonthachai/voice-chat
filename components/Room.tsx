@@ -6,110 +6,43 @@ import AudioVisualizer from './AudioVisualizer';
 import YoutubeBot from './YoutubeBot';
 import AudioBot from './AudioBot';
 
-// Initial Configuration
-const DEFAULT_SOCKET_URL = window.location.hostname === 'localhost' 
-  ? 'http://localhost:3001' 
-  : window.location.origin;
+    // Initial Configuration
+    const getSocketUrl = () => {
+        if (window.location.hostname === 'localhost') return 'http://localhost:3001';
+        return window.location.origin; // บน Render ควรใช้ origin เดียวกัน
+    };
 
-interface PeerUser {
-  userId: string;
-  stream: MediaStream;
-}
+    const socketUrl = getSocketUrl();
 
-const Room: React.FC = () => {
-    const { roomId } = useParams<{ roomId: string }>();
-    const navigate = useNavigate();
-    const location = useLocation();
-    // รับชื่อจากหน้าแรก
-    const myName = location.state?.userName || 'Guest';
-    
-    // State
-    const [peerNames, setPeerNames] = useState<{[key: string]: string}>({});
-    const [myStream, setMyStream] = useState<MediaStream | null>(null);
-    const [peers, setPeers] = useState<PeerUser[]>([]);
-    const [isMuted, setIsMuted] = useState(false);
-    const [userId, setUserId] = useState<string>('');
-    const [socketConnected, setSocketConnected] = useState(false);
-    const [connectionError, setConnectionError] = useState(false);
-    const [socketUrl, setSocketUrl] = useState(DEFAULT_SOCKET_URL);
-    const [isReconnecting, setIsReconnecting] = useState(false);
+    // ... (ส่วนอื่นๆ ใน Room.tsx) ...
 
-    // Refs
-    const socketRef = useRef<Socket | null>(null);
-    const peerRef = useRef<Peer | null>(null);
-    const peersMapRef = useRef<Map<string, any>>(new Map());
-    const myStreamRef = useRef<MediaStream | null>(null);
-    
-    // ตั้งค่า Default เป็น true เพื่อให้โชว์ Bot เลย
-    const [showYoutube, setShowYoutube] = useState(false); 
-    const [showAudio, setShowAudio] = useState(false);
-
-    // Initialize Room
     useEffect(() => {
         let mounted = true;
-        let newSocket: Socket | null = null;
-        let newPeer: Peer | null = null;
-        let localStream: MediaStream | null = null;
-
-        // *** ลบบรรทัดที่เคยผิดตรงนี้ออกแล้ว ***
-
-    const init = async () => {
-      try {
-        setConnectionError(false);
         
-        // 1. Get User Media
-        if (!myStreamRef.current) {
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: false,
-                    audio: true,
-                });
-                localStream = stream;
-                setMyStream(stream);
-                myStreamRef.current = stream;
-            } catch (e) {
-                console.error("Media Error:", e);
-                alert("Could not access microphone. Please allow permissions.");
-                return;
-            }
-        } else {
-            localStream = myStreamRef.current;
-        }
-        
-        if (!mounted || !localStream) return;
+        const init = async () => {
+            // ... (getUserMedia logic) ...
+            
+            console.log(`📡 Connecting to Socket at: ${socketUrl}`);
+            const newSocket = io(socketUrl, {
+                transports: ['websocket', 'polling'], // เพิ่ม polling เพื่อความชัวร์ถ้า websocket โดนบล็อก
+                reconnection: true,
+                reconnectionAttempts: 10
+            });
+            socketRef.current = newSocket;
 
-        // 2. Initialize Socket
-        console.log(`Attempting to connect to ${socketUrl}...`);
-        
-        newSocket = io(socketUrl, {
-            transports: ['websocket'], 
-            reconnectionAttempts: 3,
-            timeout: 5000,
-            autoConnect: true
-        });
-        socketRef.current = newSocket;
+            newSocket.on('connect', () => {
+                console.log("✅ Socket Connected! ID:", newSocket.id);
+                if (mounted) setSocketConnected(true);
+            });
 
-        newSocket.on('connect_error', (err) => {
-            console.error("Socket connection error:", err);
-            if (mounted) {
-                setConnectionError(true);
-                setSocketConnected(false);
-                setIsReconnecting(false);
-            }
-        });
-
-        newSocket.on('connect', () => {
-            console.log("Connected to signaling server");
-            if (mounted) {
-                setSocketConnected(true);
-                setConnectionError(false);
-                setIsReconnecting(false);
-            }
-        });
-
-        newSocket.on('disconnect', () => {
-             if (mounted) setSocketConnected(false);
-        });
+            newSocket.on('connect_error', (err) => {
+                console.error("❌ Socket Connection Error:", err.message);
+            });
+            
+            // ... (PeerJS logic) ...
+        };
+        init();
+    }, []);
 
         // 3. Initialize PeerJS
         if (!peerRef.current) {

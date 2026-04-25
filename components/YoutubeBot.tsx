@@ -81,19 +81,29 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
 
     const handleUrlSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        console.log(`👤 [User] Loading URL: ${inputUrl}`);
+        const cleanUrl = inputUrl.trim();
+        console.log(`👤 [User] Processing URL: ${cleanUrl}`);
         
-        if (inputUrl) {
-            const cleanUrl = inputUrl.trim();
-            setUrl(cleanUrl);
-            setPlaying(true);
-            setIsReady(false);
-            
-            if (socket) {
-                const state = { url: cleanUrl, playing: true, played: 0, timestamp: Date.now() };
-                socket.emit('youtube-change', { roomId, videoState: state });
-            }
+        if (!cleanUrl) return;
+
+        // บังคับเปลี่ยน State ภายในก่อน
+        setUrl(cleanUrl);
+        setPlaying(true);
+        setIsReady(false);
+        
+        if (socket && socket.connected) {
+            console.log("📤 [YoutubeBot] Emitting youtube-change to server...");
+            const state = { 
+                url: cleanUrl, 
+                playing: true, 
+                played: 0, 
+                timestamp: Date.now() 
+            };
+            socket.emit('youtube-change', { roomId, videoState: state });
             setInputUrl('');
+        } else {
+            console.error("❌ [YoutubeBot] Cannot emit: Socket not connected!");
+            alert("Error: Signaling server not connected. Please refresh.");
         }
     };
 
