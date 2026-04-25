@@ -3,10 +3,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
-import YoutubeBot from './YoutubeBot';
-import AudioBot from './AudioBot';
 
-// กำหนด URL ของ Socket Server
 const getSocketUrl = () => {
     if (window.location.hostname === 'localhost') return 'http://localhost:3001';
     return window.location.origin;
@@ -30,8 +27,6 @@ const Room: React.FC = () => {
     const [isMuted, setIsMuted] = useState(false);
     const [userId, setUserId] = useState<string>('');
     const [socketConnected, setSocketConnected] = useState(false);
-    const [showYoutube, setShowYoutube] = useState(false);
-    const [showAudioBot, setShowAudioBot] = useState(false);
 
     const socketRef = useRef<Socket | null>(null);
     const peerRef = useRef<Peer | null>(null);
@@ -43,14 +38,12 @@ const Room: React.FC = () => {
 
         const init = async () => {
             try {
-                // 1. ขอสิทธิ์ไมโครโฟน
                 const stream = await navigator.mediaDevices.getUserMedia({ video: false, audio: true });
                 if (mounted) {
                     setMyStream(stream);
                     myStreamRef.current = stream;
                 }
 
-                // 2. เชื่อมต่อ Socket.io
                 const socket = io(socketUrl, {
                     transports: ['websocket', 'polling'],
                     reconnection: true
@@ -62,7 +55,7 @@ const Room: React.FC = () => {
                     setSocketConnected(true);
                 });
 
-                // 3. เชื่อมต่อ PeerJS
+                // --- ปรับการตั้งค่า PeerJS เพื่อเจาะ Firewall ---
                 const peer = new Peer({
                     config: {
                         iceServers: [
@@ -71,10 +64,11 @@ const Room: React.FC = () => {
                             { urls: 'stun:stun2.l.google.com:19302' },
                             { urls: 'stun:stun3.l.google.com:19302' },
                             { urls: 'stun:stun4.l.google.com:19302' },
+                            { urls: 'stun:global.stun.twilio.com:3478' } // เพิ่ม TWILIO STUN
                         ],
                         iceCandidatePoolSize: 10,
                     },
-                    debug: 3 // เพิ่ม Debug Level ของ PeerJS
+                    debug: 3
                 });
                 peerRef.current = peer;
 
@@ -85,38 +79,25 @@ const Room: React.FC = () => {
 
                 peer.on('call', (call) => {
                     console.log("📞 [Incoming Call] from:", call.peer);
-                    
-                    // ตรวจสอบว่าไมโครโฟนเราพร้อมส่งไหม
-                    const audioTracks = stream.getAudioTracks();
-                    console.log(`🎙️ [Local Mic] Active: ${audioTracks[0]?.enabled}, State: ${audioTracks[0]?.readyState}`);
-
                     call.answer(stream);
                     
                     call.on('stream', (remoteStream) => {
-                        console.log("🔊 [Stream Received] from:", call.peer, "Tracks:", remoteStream.getAudioTracks().length);
+                        console.log("🔊 [Stream Received] from:", call.peer);
                         if (mounted) addPeerStream(call.peer, remoteStream);
                     });
 
-                    // ตรวจสอบสถานะการเชื่อมต่อ WebRTC จริงๆ
                     const pc = (call as any).peerConnection as RTCPeerConnection;
                     if (pc) {
                         pc.oniceconnectionstatechange = () => {
                             console.log(`🌐 [ICE State] with ${call.peer}: ${pc.iceConnectionState}`);
-                            if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
-                                console.error("⚠️ [ICE Failed] Connection blocked by Firewall/NAT");
-                            }
                         };
                     }
                 });
 
                 peer.on('error', (err) => {
                     console.error("❌ [PeerJS Error]:", err.type, err);
-                    if (err.type === 'network') {
-                        console.error("🌐 Network issue: Check your Wi-Fi Firewall or STUN configuration.");
-                    }
                 });
 
-                // 4. ฟังเหตุการณ์จาก Socket
                 socket.on('user-connected', ({ userId: otherId, userName }: { userId: string, userName: string }) => {
                     console.log("👤 [Socket] User Joined:", userName, "(ID:", otherId, ")");
                     setPeerNames(prev => ({ ...prev, [otherId]: userName }));
@@ -138,11 +119,10 @@ const Room: React.FC = () => {
                                         console.log(`🌐 [ICE State] with ${otherId}: ${pc.iceConnectionState}`);
                                     };
                                 }
-
                                 peersMapRef.current.set(otherId, call);
                             }
                         }
-                    }, 2000);
+                    }, 2500); // เพิ่มเวลาหน่วงเป็น 2.5 วินาที
                 });
 
                 socket.on('existing-users', (users: {[key: string]: string}) => {
@@ -159,7 +139,6 @@ const Room: React.FC = () => {
 
             } catch (err) {
                 console.error("Initialization failed:", err);
-                alert("Please allow microphone access to use voice chat.");
             }
         };
 
@@ -173,7 +152,6 @@ const Room: React.FC = () => {
         };
     }, []);
 
-    // เมื่อพร้อมแล้วให้ Join Room
     useEffect(() => {
         if (socketConnected && userId && roomId) {
             socketRef.current?.emit('join-room', roomId, userId, myName);
@@ -223,12 +201,6 @@ const Room: React.FC = () => {
                     </div>
                 </div>
                 <div className="flex space-x-2">
-                    <button onClick={() => setShowYoutube(!showYoutube)} className={`px-4 py-2 rounded text-sm font-medium transition ${showYoutube ? 'bg-red-600 text-white' : 'bg-discord-dark hover:bg-gray-700 text-gray-300 border border-gray-600'}`}>
-                        <i className="fab fa-youtube mr-2"></i> Youtube
-                    </button>
-                    <button onClick={() => setShowAudioBot(!showAudioBot)} className={`px-4 py-2 rounded text-sm font-medium transition ${showAudioBot ? 'bg-indigo-600 text-white' : 'bg-discord-dark hover:bg-gray-700 text-gray-300 border border-gray-600'}`}>
-                        <i className="fas fa-music mr-2"></i> Music
-                    </button>
                     <button onClick={copyRoomId} className="bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium transition">
                         Copy ID
                     </button>
@@ -239,25 +211,7 @@ const Room: React.FC = () => {
             </header>
 
             <main className="flex-1 p-6 overflow-y-auto">
-                <div className="flex flex-col items-center">
-                    {showYoutube && (
-                        <YoutubeBot 
-                            socket={socketRef.current} 
-                            roomId={roomId || ''} 
-                            onClose={() => setShowYoutube(false)} 
-                        />
-                    )}
-                    
-                    {showAudioBot && (
-                        <AudioBot 
-                            socket={socketRef.current} 
-                            roomId={roomId || ''} 
-                            onClose={() => setShowAudioBot(false)} 
-                        />
-                    )}
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mt-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                     {/* My Card */}
                     <div className="bg-discord-darker rounded-lg p-4 flex flex-col items-center justify-center relative border border-discord-darkest aspect-video">
                         <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-4 ${isMuted ? 'bg-discord-danger' : 'bg-discord-success'} relative overflow-hidden ring-4 ring-discord-darkest`}>
@@ -289,9 +243,8 @@ const Room: React.FC = () => {
                                     playsInline
                                     ref={(audio) => { 
                                         if (audio && audio.srcObject !== peer.stream) {
-                                            console.log(`🔈 [Audio Element] Setting stream for user: ${peer.userId}`);
                                             audio.srcObject = peer.stream; 
-                                            audio.muted = false; // สำคัญ: ต้องไม่ Muted สำหรับ Remote Stream
+                                            audio.muted = false;
                                         } 
                                     }} 
                                 />
