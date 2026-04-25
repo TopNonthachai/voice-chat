@@ -15,8 +15,11 @@ interface AudioState {
     timestamp: number;
 }
 
+const ReactPlayerAny = ReactPlayer as any;
+
 const AudioBot: React.FC<AudioBotProps> = ({ socket, roomId, onClose }) => {
-    const [url, setUrl] = useState('https://soundcloud.com/lakeyinspired/chill-day');
+    // ใช้ SoundCloud Link ที่น่าจะทำงานชัวร์ๆ
+    const [url, setUrl] = useState('https://soundcloud.com/futureclassic/flume-sleepless-feat-jezzabell-doran');
     const [playing, setPlaying] = useState(false);
     const [played, setPlayed] = useState(0);
     const [inputUrl, setInputUrl] = useState('');
@@ -37,10 +40,9 @@ const AudioBot: React.FC<AudioBotProps> = ({ socket, roomId, onClose }) => {
             setPlayed(state.played);
             
             if (playerRef.current) {
-                const currentTime = playerRef.current.getCurrentTime() || 0;
                 const totalDuration = playerRef.current.getDuration() || 1;
-                // ถ้าเวลาต่างกันเกิน 2 วิ ค่อย Seek
-                if (Math.abs(currentTime - (state.played * totalDuration)) > 2) {
+                // Seek ถ้าต่างกันเยอะ
+                if (Math.abs(playerRef.current.getCurrentTime() - (state.played * totalDuration)) > 3) {
                     playerRef.current.seekTo(state.played);
                 }
             }
@@ -71,21 +73,15 @@ const AudioBot: React.FC<AudioBotProps> = ({ socket, roomId, onClose }) => {
     const handleUrlSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (inputUrl && socket) {
-            // 1. เปลี่ยนจอตัวเองทันที
             setUrl(inputUrl);
             setPlaying(true);
             setPlayed(0);
-
-            // 2. บอกเพื่อน
             const state = { url: inputUrl, playing: true, played: 0, timestamp: Date.now() };
             socket.emit('audio-change', { roomId, audioState: state });
             setInputUrl('');
         }
     };
 
-    const ReactPlayerAny = ReactPlayer as any;
-
-    // Helper format time
     const formatTime = (seconds: number) => {
         if (!seconds || isNaN(seconds)) return "00:00";
         const date = new Date(seconds * 1000);
@@ -106,13 +102,19 @@ const AudioBot: React.FC<AudioBotProps> = ({ socket, roomId, onClose }) => {
                 </button>
             </div>
 
-            <div className="hidden">
+            {/* ซ่อนแบบที่ API ยังทำงานได้ */}
+            <div className="absolute -top-[9999px] -left-[9999px] opacity-0 pointer-events-none">
                 <ReactPlayerAny
                     ref={playerRef}
                     url={url}
                     playing={playing}
-                    width="0"
-                    height="0"
+                    width="640px"
+                    height="360px"
+                    onError={(e: any) => {
+                        console.error("Audio Player Error:", e);
+                        setPlaying(false);
+                        alert("Cannot play this audio link. Try another one.");
+                    }}
                     onProgress={(p: any) => { 
                         if (!isRemoteUpdate.current) setPlayed(p.played); 
                     }}

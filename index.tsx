@@ -9,9 +9,5 @@ if (!rootElement) {
 
 const root = ReactDOM.createRoot(rootElement);
 root.render(
-  // StrictMode is intentional, but note that it causes double-invocation of useEffects in dev.
-  // Our socket/peer logic handles this via cleanup functions.
-  <React.StrictMode>
     <App />
-  </React.StrictMode>
 );

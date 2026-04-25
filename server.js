@@ -45,21 +45,18 @@ io.on('connection', socket => {
     });
 
     // --- ส่วนจัดการ Youtube Bot ---
-    // (ย้ายออกมาไว้นอก join-room เพื่อป้องกัน Event ซ้ำซ้อน)
     socket.on('youtube-change', (data) => {
         const { roomId, videoState } = data;
-        // อัปเดตสถานะล่าสุดเก็บไว้
+        console.log(`📺 [Youtube] Room ${roomId} changed state to:`, videoState.url);
         roomVideoStates[roomId] = videoState;
-        // บอกคนอื่นให้ปรับตาม
         socket.to(roomId).emit('youtube-update', videoState);
     });
 
     // --- ส่วนจัดการ Audio Bot ---
     socket.on('audio-change', (data) => {
         const { roomId, audioState } = data;
-        // อัปเดตสถานะล่าสุดเก็บไว้
+        console.log(`🎵 [Audio] Room ${roomId} changed state to:`, audioState.url);
         roomAudioStates[roomId] = audioState;
-        // บอกคนอื่นให้ปรับตาม
         socket.to(roomId).emit('audio-update', audioState);
     });
 });
