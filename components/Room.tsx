@@ -85,6 +85,11 @@ const Room: React.FC = () => {
 
                 peer.on('call', (call) => {
                     console.log("📞 [Incoming Call] from:", call.peer);
+                    
+                    // ตรวจสอบว่าไมโครโฟนเราพร้อมส่งไหม
+                    const audioTracks = stream.getAudioTracks();
+                    console.log(`🎙️ [Local Mic] Active: ${audioTracks[0]?.enabled}, State: ${audioTracks[0]?.readyState}`);
+
                     call.answer(stream);
                     
                     call.on('stream', (remoteStream) => {
@@ -92,13 +97,23 @@ const Room: React.FC = () => {
                         if (mounted) addPeerStream(call.peer, remoteStream);
                     });
 
-                    call.on('error', (err) => {
-                        console.error("❌ [Call Error] with:", call.peer, err);
-                    });
+                    // ตรวจสอบสถานะการเชื่อมต่อ WebRTC จริงๆ
+                    const pc = (call as any).peerConnection as RTCPeerConnection;
+                    if (pc) {
+                        pc.oniceconnectionstatechange = () => {
+                            console.log(`🌐 [ICE State] with ${call.peer}: ${pc.iceConnectionState}`);
+                            if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+                                console.error("⚠️ [ICE Failed] Connection blocked by Firewall/NAT");
+                            }
+                        };
+                    }
                 });
 
                 peer.on('error', (err) => {
                     console.error("❌ [PeerJS Error]:", err.type, err);
+                    if (err.type === 'network') {
+                        console.error("🌐 Network issue: Check your Wi-Fi Firewall or STUN configuration.");
+                    }
                 });
 
                 // 4. ฟังเหตุการณ์จาก Socket
@@ -106,7 +121,6 @@ const Room: React.FC = () => {
                     console.log("👤 [Socket] User Joined:", userName, "(ID:", otherId, ")");
                     setPeerNames(prev => ({ ...prev, [otherId]: userName }));
                     
-                    // หน่วงเวลาเล็กน้อยเพื่อให้ Peer ปลายทางพร้อมรับสาย
                     setTimeout(() => {
                         if (peerRef.current && mounted) {
                             console.log("📡 [Outgoing Call] Calling:", otherId);
@@ -118,9 +132,12 @@ const Room: React.FC = () => {
                                     addPeerStream(otherId, remoteStream);
                                 });
 
-                                call.on('error', (err) => {
-                                    console.error("❌ [Outgoing Call Error]:", err);
-                                });
+                                const pc = (call as any).peerConnection as RTCPeerConnection;
+                                if (pc) {
+                                    pc.oniceconnectionstatechange = () => {
+                                        console.log(`🌐 [ICE State] with ${otherId}: ${pc.iceConnectionState}`);
+                                    };
+                                }
 
                                 peersMapRef.current.set(otherId, call);
                             }
@@ -267,7 +284,17 @@ const Room: React.FC = () => {
                                     <AudioVisualizer stream={peer.stream} isMuted={false} height={96} />
                                 </div>
                                 <img src={`https://picsum.photos/seed/${peer.userId}/200`} alt="Peer" className="w-20 h-20 rounded-full border-4 border-discord-darker z-10" />
-                                <audio autoPlay ref={(audio) => { if (audio) audio.srcObject = peer.stream; }} />
+                                <audio 
+                                    autoPlay 
+                                    playsInline
+                                    ref={(audio) => { 
+                                        if (audio && audio.srcObject !== peer.stream) {
+                                            console.log(`🔈 [Audio Element] Setting stream for user: ${peer.userId}`);
+                                            audio.srcObject = peer.stream; 
+                                            audio.muted = false; // สำคัญ: ต้องไม่ Muted สำหรับ Remote Stream
+                                        } 
+                                    }} 
+                                />
                             </div>
                             <div className="font-semibold text-white mb-1">{peerNames[peer.userId] || 'Guest'}</div>
                         </div>

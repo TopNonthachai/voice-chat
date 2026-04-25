@@ -43,18 +43,15 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
             const currentID = getYouTubeID(url);
             const incomingID = getYouTubeID(state.url);
 
-            console.log(`📥 [YoutubeBot] Update: CurrentID=${currentID}, IncomingID=${incomingID}, Playing=${state.playing}`);
-            
-            // ถ้าเป็น Video เดียวกันและสถานะเดียวกัน ไม่ต้องทำอะไร
+            // ถ้าเป็น Video เดียวกันและกำลังเล่น/หยุดเหมือนกัน ให้ข้ามไป
             if (currentID === incomingID && state.playing === playing) {
-                console.log("⏭️ [YoutubeBot] Skip update: No change");
                 return;
             }
 
             isRemoteUpdate.current = true;
+            console.log(`📥 [YoutubeBot] Syncing: ${incomingID} (Playing: ${state.playing})`);
             
             if (currentID !== incomingID) {
-                console.log("📥 [YoutubeBot] New Video detected -> Changing URL");
                 setUrl(state.url);
                 setPlaying(state.playing);
             } else {
@@ -63,14 +60,13 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
             
             if (playerRef.current && state.played > 0) {
                 const currentTime = playerRef.current.getCurrentTime();
-                const diff = Math.abs(currentTime - state.played);
-                if (diff > 5) { // เพิ่ม Threshold กันการกระตุก
-                    console.log(`📡 [YoutubeBot] Syncing Time: diff=${diff.toFixed(2)}s`);
+                if (Math.abs(currentTime - state.played) > 5) {
                     playerRef.current.seekTo(state.played, 'seconds');
                 }
             }
             
-            setTimeout(() => { isRemoteUpdate.current = false; }, 1000);
+            // ปลดล็อค Remote Update หลังจาก UI อัปเดตเสร็จ
+            setTimeout(() => { isRemoteUpdate.current = false; }, 1500);
         };
 
         socket.on('youtube-update', handleUpdate);
@@ -83,17 +79,17 @@ const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
     }, [socket, url, playing]);
 
     const emitChange = (newPlaying: boolean) => {
+        // ถ้าเป็นการอัปเดตที่มาจากคนอื่น (Remote) ห้ามส่งกลับไปหา Server (ป้องกัน Loop)
         if (isRemoteUpdate.current || !socket) return;
         
         const played = playerRef.current ? playerRef.current.getCurrentTime() : 0;
-        console.log(`📤 [YoutubeBot] Emitting: Playing=${newPlaying}, ID=${getYouTubeID(url)}`);
-        
         const state: VideoState = {
             url,
             playing: newPlaying,
             played,
             timestamp: Date.now()
         };
+        console.log(`📤 [YoutubeBot] Emitting Change: ${getYouTubeID(url)}`);
         socket.emit('youtube-change', { roomId, videoState: state });
     };
 
