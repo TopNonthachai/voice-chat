@@ -4,11 +4,13 @@ interface AudioVisualizerProps {
   stream: MediaStream;
   isMuted: boolean;
   height?: number;
+  onSpeaking?: (isSpeaking: boolean) => void;
 }
 
-const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isMuted, height = 40 }) => {
+const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isMuted, height = 40, onSpeaking }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationRef = useRef<number>();
+  const speakingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   useEffect(() => {
     if (!canvasRef.current || !stream || isMuted) {
@@ -17,6 +19,7 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isMuted, heig
             const ctx = canvasRef.current.getContext('2d');
             ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
         }
+        onSpeaking?.(false);
         return;
     }
 
@@ -35,9 +38,20 @@ const AudioVisualizer: React.FC<AudioVisualizerProps> = ({ stream, isMuted, heig
     
     if (!ctx) return;
 
+    let lastSpeakingState = false;
+
     const draw = () => {
       animationRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(dataArray);
+
+      // Detect speaking
+      const average = dataArray.reduce((a, b) => a + b, 0) / bufferLength;
+      const isSpeaking = average > 15; // Threshold for speaking
+
+      if (isSpeaking !== lastSpeakingState) {
+        lastSpeakingState = isSpeaking;
+        onSpeaking?.(isSpeaking);
+      }
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 

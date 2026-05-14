@@ -59,6 +59,18 @@ io.on('connection', socket => {
         roomAudioStates[roomId] = audioState;
         socket.to(roomId).emit('audio-update', audioState);
     });
+
+    // --- ส่วนจัดการ Screen Sharing ---
+    socket.on('screen-start', (data) => {
+        const { roomId, userId } = data;
+        console.log(`🖥️ [Screen] User ${userId} started sharing in ${roomId}`);
+        socket.to(roomId).emit('screen-shared', { userId });
+    });
+
+    socket.on('screen-stop', (roomId) => {
+        console.log(`🖥️ [Screen] Stopped sharing in ${roomId}`);
+        socket.to(roomId).emit('screen-stopped');
+    });
 });
 
 // --- ส่วนเสิร์ฟหน้าเว็บ React ---
