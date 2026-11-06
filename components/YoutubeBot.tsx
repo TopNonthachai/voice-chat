@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ReactPlayer from 'react-player';
 import RoomChat from './RoomChat';
 import { Socket } from 'socket.io-client';
-interface Track { id: string; videoId: string; title: string }
+interface Track { id: string; videoId: string; title: string; author?: string }
 interface Activity { id: string; timestamp: number; actor: string; action: string; message: string; title: string; position?: number }
 interface MusicState {
     queue: Track[]; currentId: string | null; playing: boolean; position: number;
@@ -13,6 +13,12 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
     const [state, setState] = useState<MusicState | null>(null);
     const [input, setInput] = useState('');
     const [activeTab, setActiveTab] = useState<'queue' | 'chat' | 'log'>('queue');
+    const [connected, setConnected] = useState(Boolean(socket?.connected));
+    const [syncStatus, setSyncStatus] = useState('กำลังรับสถานะห้อง…');
+    const [syncing, setSyncing] = useState(false);
+    const syncingRef = useRef(false);
+    const syncTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const forceSync = useRef(false);
     const [unread, setUnread] = useState(0);
     const [error, setError] = useState('');
     const [enabled, setEnabled] = useState(false);
@@ -33,9 +39,10 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
     };
     const align = () => {
         const element = player.current;
-        if (!enabledRef.current || !readyRef.current || !element || !latest.current || element.ended) return;
+        if (!enabledRef.current || !readyRef.current || !element || !latest.current || (element.ended && !forceSync.current)) return;
         const target = Math.min(targetPosition(), Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : Infinity);
-        if (Math.abs(element.currentTime - target) > 1.5) element.currentTime = target;
+        if (forceSync.current || Math.abs(element.currentTime - target) > 1.5) element.currentTime = target;
+        forceSync.current = false;
     };
     useEffect(() => {
         if (!socket) return;
@@ -46,14 +53,26 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
             }
             latest.current = next; receivedAt.current = performance.now();
             setState(next); setPosition(next.position); align();
+            if(syncTimer.current)clearTimeout(syncTimer.current);
+            setSyncing(false);syncingRef.current=false;setSyncStatus('ซิงก์กับห้องแล้ว');
         };
         const sync = () => socket.emit('music-sync', { roomId });
-        socket.on('music-state', update); socket.on('connect', sync); sync();
+        const reconnect = () => {setConnected(true);latest.current=null;forceSync.current=true;setSyncStatus('กำลังรับสถานะห้อง…');sync();};
+        const disconnected = () => {setConnected(false);setSyncing(false);syncingRef.current=false;if(syncTimer.current)clearTimeout(syncTimer.current);setSyncStatus('ขาดการเชื่อมต่อ กำลังเชื่อมต่อใหม่…');};
+        socket.on('disconnect',disconnected);socket.on('connect_error',disconnected);
+        socket.on('music-state', update); socket.on('connect', reconnect); sync();
         const timer = window.setInterval(() => { align(); setPosition(targetPosition()); }, 1000);
         const visible = () => { if (document.visibilityState === 'visible') sync(); };
         document.addEventListener('visibilitychange', visible);
-        return () => {socket.off('music-state', update); socket.off('connect', sync); clearInterval(timer); document.removeEventListener('visibilitychange', visible);};
+        return () => {socket.off('music-state', update); socket.off('connect', reconnect);socket.off('disconnect',disconnected);socket.off('connect_error',disconnected);if(syncTimer.current)clearTimeout(syncTimer.current); clearInterval(timer); document.removeEventListener('visibilitychange', visible);};
     }, [socket, roomId]);
+    const resync = () => {
+        if(!socket?.connected){setSyncStatus('กำลังเชื่อมต่อใหม่…');socket?.connect();return;}
+        if(syncingRef.current)return;
+        setSyncing(true);syncingRef.current=true;forceSync.current=true;setSyncStatus('กำลังซิงก์ใหม่…');
+        syncTimer.current=setTimeout(()=>{setSyncing(false);syncingRef.current=false;setSyncStatus('ยังไม่ได้รับคำตอบ ลองซิงก์ใหม่อีกครั้ง');},8000);
+        socket.emit('music-sync',{roomId});
+    };
     const command = (action: string, extra: Record<string, unknown> = {}, success?: () => void) => {
         if (!socket?.connected) {setError('กำลังเชื่อมต่อห้องใหม่…'); return;}
         setError('');
@@ -76,6 +95,7 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
     const commitSeek = () => {if (seek !== null) {command('seek', {position:seek}); setSeek(null);}};
     return <section className="listening-layout">
         <div className="player-panel"><div className="panel-top"><div><span className="eyebrow">THE LISTENING ROOM</span><h2>เพลงนี้ มีเราอยู่ด้วยกัน</h2></div><span className="live-pill"><i /> LIVE ROOM</span></div>
+        <div className="sync-toolbar"><span role="status"><i className={`status-dot ${connected?'on':''}`}/>{connected?syncStatus:'ขาดการเชื่อมต่อ กำลังเชื่อมต่อใหม่…'}</span><button className="btn secondary" disabled={syncing} onClick={resync}>{syncing?'กำลังซิงก์…':'↻ ซิงก์ใหม่'}</button></div>
         <div className="video-stage">
             {current ? <>{enabled ? <div className="video-media" inert>
                 <ReactPlayer key={`${current.id}-${state?.generation}`} ref={player} src={`https://www.youtube.com/watch?v=${current.videoId}`}
@@ -106,7 +126,7 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
         <form className="add-song" onSubmit={e => {e.preventDefault(); const value=input.trim();if(value) command('add',{url:value},()=>setInput(''));}}><label htmlFor="song-url">เพิ่มเพลงเข้าห้อง</label><div><input id="song-url" type="text" value={input} onChange={e=>setInput(e.target.value)} placeholder="วางลิงก์ YouTube ที่นี่…" /><button className="btn primary" disabled={!input.trim()} aria-label="เพิ่มเพลง">＋</button></div></form>
         <div className="queue-modes"><button className="mode-button" aria-pressed={Boolean(state?.shuffle)} onClick={()=>command('shuffle',{enabled:!state?.shuffle})}><span>⤨ สุ่มคิว</span><b>{state?.shuffle?'เปิด':'ปิด'}</b></button><button className="mode-button" aria-pressed={Boolean(state?.repeat)} onClick={()=>command('repeat',{enabled:!state?.repeat})}><span>↻ วนทั้งคิว</span><b>{state?.repeat?'เปิด':'ปิด'}</b></button></div><p className="micro">{state?.shuffle?'สุ่มไม่ซ้ำจนฟังครบทุกเพลงในรอบ':'เล่นตามลำดับในคิว'} · {state?.repeat?'ฟังครบแล้วเริ่มรอบใหม่':'ฟังครบแล้วหยุด'}</p>
         <ol className="song-list">{state?.queue.map((item,index)=><li key={item.id} className={item.id===current?.id?'current':''}>
-            <button className="song-select" onClick={()=>command('select',{id:item.id})}><span className="song-number">{item.id===current?.id?'♫':String(index+1).padStart(2,'0')}</span><img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" /><span><strong>{item.title}</strong><small>{item.id===current?.id?'กำลังเลือกฟัง':'YouTube · พร้อมเล่น'}</small></span></button>
+            <button className="song-select" onClick={()=>command('select',{id:item.id})}><span className="song-number">{item.id===current?.id?'♫':String(index+1).padStart(2,'0')}</span><img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" /><span><strong>{item.title}</strong><small>{item.id===current?.id?'กำลังเลือกฟัง':item.author || 'YouTube · พร้อมเล่น'}</small></span></button>
             <div className="song-actions"><button aria-label={`ย้ายเพลง ${index+1} ขึ้น`} disabled={index===0} onClick={()=>command('move',{id:item.id,direction:-1})}>↑</button><button aria-label={`ย้ายเพลง ${index+1} ลง`} disabled={index===state.queue.length-1} onClick={()=>command('move',{id:item.id,direction:1})}>↓</button><button aria-label={`ลบเพลง ${index+1}`} onClick={()=>command('remove',{id:item.id})}>×</button></div>
         </li>)}</ol>{!state?.queue.length&&<div className="empty-queue"><span>✦</span><p>คิวว่าง แต่บรรยากาศพร้อมแล้ว</p><small>ทุกคนในห้องช่วยกันเพิ่มเพลงได้</small></div>}
         </div>

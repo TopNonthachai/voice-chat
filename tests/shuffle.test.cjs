@@ -7,7 +7,7 @@ const { io: client } = require('socket.io-client');
 const { registerMusic } = require('../music-server.cjs');
 
 test('shuffle plays every song once per round; repeat starts fresh and skips duplicate ended reports', {timeout:15000}, async t => {
-    const http = createServer(); const io = new Server(http); registerMusic(io);
+    const http = createServer(); const io = new Server(http); registerMusic(io,{resolveTitle:async()=>null});
     io.on('connection', s => s.on('join', () => {s.join('test');s.emit('joined');}));
     await new Promise(resolve => http.listen(0,'127.0.0.1',resolve));
     const socket = client(`http://127.0.0.1:${http.address().port}`,{autoConnect:false});

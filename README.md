@@ -53,7 +53,7 @@ Changing local files does not update Render. Deploy the updated repository revis
 - Run a single server instance. Multiple instances require shared room state and a Socket.IO adapter.
 - Individual YouTube links and raw video IDs are supported; importing a full YouTube playlist is not implemented.
 - Videos that disallow embedding, regional restrictions, ads and browser autoplay restrictions may affect playback.
-- Queue entries currently show a thumbnail and video ID instead of fetched video titles.
+- Queue entries fetch the real video title and channel through YouTube oEmbed, with the video ID as a fallback. No API key is required.
 - Anyone with the room link can control playback. There are no host-only permissions yet.
 
 ## Checks
@@ -91,3 +91,11 @@ The sidebar includes Queue, Chat and History tabs. Chat shows the sender name, a
 The attachment button supports files up to 5 MB, optional captions, raster image previews and downloads. Files are kept in server memory (20 MB per room, 100 MB total). Downloads and previews require an active connection in the same room. Files attached to messages removed from the 100-message history are also removed. All messages and files disappear when the server restarts or deploys. No external storage or API key is required.
 
 Client submission IDs prevent duplicate delivery when retrying the same send on an existing room identity. Server-side checks reject blank or oversized messages, files over the limit, and requests from outside the room. Integration tests cover text delivery, retries, late join history, room isolation, attachment download, PNG preview and upload size limits. Browser QA covers sending a message and attaching/sending a sample text file from the chat tab.
+
+## Expiry, video titles and resync
+
+Attachments expire 24 hours after upload. A server timer removes expired buffers at least every minute, and each file request/history sync also checks expiry. Room/global memory counters are released. The original message remains with an expired attachment indicator; expired downloads return HTTP 410. Files can disappear sooner on server restart or history eviction. Expiry timestamps are displayed beside downloads.
+
+Real video titles and channel names are fetched server-side from YouTube oEmbed without an API key. Fetches have a 5-second timeout, coalesce concurrent requests, and cache successful results for 24 hours. Metadata updates are broadcast without changing playback time or adding an activity-log event. If unavailable, the video ID remains usable.
+
+The player shows connection/sync status and a manual resync button. Resync fetches a read-only room snapshot and seeks only the requesting local player. Disconnected rooms keep the sidebar mounted while reconnecting; reconnect accepts a fresh server snapshot even after a server restart resets revisions. Playlists still live in server memory: this update does not add a database or permanent playlist storage.

@@ -1,3 +1,4 @@
+const { createTitleResolver } = require('./youtube-metadata.cjs');
 const { randomUUID } = require('node:crypto');
 
 function videoId(input) {
@@ -15,7 +16,7 @@ function videoId(input) {
     } catch { return null; }
 }
 
-function registerMusic(io) {
+function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
     const rooms = new Map();
     const empty = () => ({ queue: [], currentId: null, playing: false, position: 0, updatedAt: Date.now(), revision: 0, generation: 0, shuffle: false, repeat: false, remaining: [], finished: false, activity: [] });
     function snapshot(state) {
@@ -23,10 +24,12 @@ function registerMusic(io) {
         return { ...state, position: state.position + (state.playing ? Math.max(0, now - state.updatedAt) / 1000 : 0), updatedAt: now };
     }
     io.on('connection', socket => {
-        socket.on('music-sync', ({ roomId } = {}) => {
+        socket.on('music-sync', ({ roomId } = {}, ack) => {
             if (!socket.rooms.has(roomId)) return;
             if (!rooms.has(roomId)) rooms.set(roomId, empty());
-            socket.emit('music-state', snapshot(rooms.get(roomId)));
+            const current=snapshot(rooms.get(roomId));
+            socket.emit('music-state', current);
+            if(typeof ack==='function')ack({ok:true,state:current});
         });
         socket.on('music-command', (data = {}, ack = () => {}) => {
             if (typeof ack !== 'function') ack = () => {};
@@ -146,13 +149,25 @@ function registerMusic(io) {
             const target = ['next', 'ended'].includes(action) ? next.queue.find(item => item.id === next.currentId) : affected;
             next.activity = [...(state.activity || []), {
                 id: randomUUID(), timestamp: Date.now(), actor: action === 'ended' ? 'ระบบ' : socket.data.userName || 'Guest',
-                action, message: labels[action], title: target?.title || '',
+                action, message: labels[action], trackId: target?.id, title: target?.title || '',
                 position: action === 'seek' ? data.position : undefined
             }].slice(-100);
             next.revision++;
             rooms.set(roomId, next);
             io.to(roomId).emit('music-state', next);
             ack({ ok: true });
+            if(action==='add') {
+                const added=next.queue.at(-1);
+                Promise.resolve().then(()=>resolveTitle(added.videoId)).then(metadata=>{
+                    if(!metadata)return;
+                    const current=rooms.get(roomId);
+                    if(!current?.queue.some(item=>item.id===added.id))return;
+                    const updated={...current,revision:current.revision+1,
+                        queue:current.queue.map(item=>item.id===added.id?{...item,title:metadata.title,author:metadata.author}:item),
+                        activity:current.activity.map(entry=>entry.trackId===added.id?{...entry,title:metadata.title}:entry)};
+                    rooms.set(roomId,updated);io.to(roomId).emit('music-state',snapshot(updated));
+                }).catch(()=>{});
+            }
         });
     });
     return { rooms, snapshot };

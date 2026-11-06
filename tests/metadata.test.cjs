@@ -1,0 +1,31 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {once}=require('node:events');
+const {createServer}=require('node:http');
+const {Server}=require('socket.io');
+const {io:client}=require('socket.io-client');
+const {createTitleResolver}=require('../youtube-metadata.cjs');
+const {registerMusic}=require('../music-server.cjs');
+test('title lookup validates IDs, caches/coalesces requests, and handles unavailable videos',async()=>{
+ let calls=0,clock=0;
+ const resolve=createTitleResolver({now:()=>clock,fetchImpl:async url=>{calls++;assert.equal(url.hostname,'www.youtube.com');return {ok:true,json:async()=>({title:'เพลงจริง & friends',author_name:'Artist'})};}});
+ assert.equal(await resolve('invalid'),null);
+ const [a,b]=await Promise.all([resolve('LXb3EKWsInQ'),resolve('LXb3EKWsInQ')]);assert.equal(a.title,'เพลงจริง & friends');assert.equal(b.author,'Artist');assert.equal(calls,1);
+ await resolve('LXb3EKWsInQ');assert.equal(calls,1);clock=24*60*60*1000;await resolve('LXb3EKWsInQ');assert.equal(calls,2);
+ const fail=createTitleResolver({fetchImpl:async()=>{throw new Error('offline');}});assert.equal(await fail('LXb3EKWsInQ'),null);
+});
+test('async titles reach everyone without rewinding time; resync is read-only; title updates keep logs', {timeout:10000},async t=>{
+ const http=createServer(),io=new Server(http);let finish;
+ const music=registerMusic(io,{resolveTitle:()=>new Promise(resolve=>{finish=resolve;})});
+ io.on('connection',s=>s.on('join',()=>{s.join('room');s.emit('joined');}));await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));
+ const s=client(`http://127.0.0.1:${http.address().port}`,{autoConnect:false});t.after(async()=>{s.disconnect();await new Promise(resolve=>io.close(resolve));});
+ let event=once(s,'connect');s.connect();await event;event=once(s,'joined');s.emit('join');await event;
+ const command=(action,extra={})=>new Promise((resolve,reject)=>s.timeout(2000).emit('music-command',{roomId:'room',action,...extra},(e,r)=>e?reject(e):resolve(r)));
+ await command('add',{url:'LXb3EKWsInQ'});const first=music.rooms.get('room').currentId;
+ await command('seek',{currentId:first,position:60});await command('pause',{currentId:first});
+ event=once(s,'music-state');finish({title:'Actual title',author:'Artist'});const state=(await event)[0];
+ assert.equal(state.queue[0].title,'Actual title');assert.equal(state.playing,false);assert.ok(state.position>=60);assert.equal(state.activity[0].title,'Actual title');
+ const revision=state.revision;
+ const snapshot=await new Promise((resolve,reject)=>s.timeout(2000).emit('music-sync',{roomId:'room'},(e,r)=>e?reject(e):resolve(r.state)));
+ assert.equal(snapshot.revision,revision);assert.equal(snapshot.playing,false);assert.equal(snapshot.currentId,first);
+});

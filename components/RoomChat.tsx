@@ -4,7 +4,7 @@ import { Avatar } from './Profile';
 interface Message {
     id: string; sequence: number; clientId: string; senderId: string; senderSocketId: string;
     name: string; avatar: string; text: string; timestamp: number;
-    attachment?: {id: string; name: string; size: number; image: boolean};
+    attachment?: {id: string; name: string; size: number; image: boolean; expiresAt: number; expired?: boolean};
 }
 const sizeLabel = (size: number) => size < 1024*1024 ? `${Math.ceil(size/1024)} KB` : `${(size/1024/1024).toFixed(1)} MB`;
 export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket|null;roomId:string;active:boolean;onUnread:React.Dispatch<React.SetStateAction<number>>}) {
@@ -13,6 +13,7 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
     const [file,setFile]=useState<File|null>(null);
     const [pending,setPending]=useState(false);
     const [error,setError]=useState('');
+    const [clock,setClock]=useState(Date.now());
     const input=useRef<HTMLInputElement>(null);
     const list=useRef<HTMLDivElement>(null);
     const activeRef=useRef(active);activeRef.current=active;
@@ -35,9 +36,12 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
             merge([message]);
             if(!activeRef.current&&message.senderSocketId!==socket.id)onUnread(n=>n+1);
         };
+        const expire=({id}:{id:string})=>setMessages(previous=>previous.map(message=>message.attachment?.id===id?{...message,attachment:{...message.attachment,expired:true}}:message));
         const sync=()=>socket.emit('chat-sync',{roomId});
+        socket.on('chat-file-expired',expire);
+        const tick=setInterval(()=>setClock(Date.now()),30000);
         socket.on('chat-history',history);socket.on('chat-message',receive);socket.on('connect',sync);sync();
-        return ()=>{socket.off('chat-history',history);socket.off('chat-message',receive);socket.off('connect',sync);controller.current?.abort();};
+        return ()=>{clearInterval(tick);socket.off('chat-file-expired',expire);socket.off('chat-history',history);socket.off('chat-message',receive);socket.off('connect',sync);controller.current?.abort();};
     },[socket,roomId,onUnread]);
     useEffect(()=>{if(active){onUnread(0);follow.current=true;if(list.current)list.current.scrollTop=list.current.scrollHeight;}},[active,onUnread]);
     useEffect(()=>{if(active&&follow.current&&list.current)list.current.scrollTop=list.current.scrollHeight;},[messages,active]);
@@ -70,7 +74,7 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
             {messages.map(message=><article className={`chat-message ${message.senderSocketId===socket?.id?'mine':''}`} key={message.id}>
                 <Avatar avatar={message.avatar}/><div className="chat-message-body"><header><strong>{message.name}</strong><time dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})}</time></header>
                 {message.text&&<p>{message.text}</p>}
-                {message.attachment&&<div className="chat-attachment">{message.attachment.image&&<img src={attachmentUrl(message.attachment.id,true)} alt={message.attachment.name} loading="lazy" onError={e=>{e.currentTarget.style.display='none';}}/>}<a href={attachmentUrl(message.attachment.id)} download={message.attachment.name}><span>↧</span><span><strong>{message.attachment.name}</strong><small>{sizeLabel(message.attachment.size)} · ดาวน์โหลด</small></span></a></div>}
+                {message.attachment&&<div className="chat-attachment">{message.attachment.expired||message.attachment.expiresAt<=clock ? <div className="expired-attachment"><strong>{message.attachment.name}</strong><span>ไฟล์หมดอายุแล้ว</span></div> : <>{message.attachment.image&&<img src={attachmentUrl(message.attachment.id,true)} alt={message.attachment.name} loading="lazy" onError={e=>{e.currentTarget.style.display='none';}}/>}<a href={attachmentUrl(message.attachment.id)} download={message.attachment.name}><span>↧</span><span><strong>{message.attachment.name}</strong><small>{sizeLabel(message.attachment.size)} · ดาวน์โหลด</small></span></a><small className="file-expiry">หมดอายุ {new Date(message.attachment.expiresAt).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</small></>}</div>}
                 </div>
             </article>)}
         </div>
@@ -81,6 +85,6 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
             <input type="file" className="sr-only" ref={input} aria-label="เลือกไฟล์ส่งในแชต" onChange={e=>{const selected=e.target.files?.[0];e.target.value='';if(!selected)return;if(!selected.size||selected.size>5*1024*1024){setError('เลือกไฟล์ขนาดมากกว่า 0 และไม่เกิน 5 MB');return;}setFile(selected);setError('');}}/>
             {error&&<p role="alert" className="notice">{error}</p>}
         </form>
-        <p className="micro chat-note">Enter เพื่อส่ง · Shift + Enter ขึ้นบรรทัดใหม่<br/>ไฟล์ไม่เกิน 5 MB · แชตและไฟล์หายเมื่อเซิร์ฟเวอร์รีสตาร์ต</p>
+        <p className="micro chat-note">Enter เพื่อส่ง · Shift + Enter ขึ้นบรรทัดใหม่<br/>ไฟล์ไม่เกิน 5 MB · หมดอายุใน 24 ชั่วโมง หรือเมื่อเซิร์ฟเวอร์รีสตาร์ต</p>
     </div>;
 }

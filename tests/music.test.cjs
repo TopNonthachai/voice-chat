@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { io: client } = require('socket.io-client');
+require('../youtube-metadata.cjs').createTitleResolver=()=>async()=>null;
 const { server, io } = require('../server.js');
 const { videoId } = require('../music-server.cjs');
 const { once } = require('node:events');

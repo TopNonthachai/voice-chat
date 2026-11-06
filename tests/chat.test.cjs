@@ -10,7 +10,8 @@ const {registerChat}=require('../chat-server.cjs');
 test('room chat delivers once, preserves history, validates text and isolates file uploads/downloads',{timeout:20000},async t=>{
     const app=express(),http=createServer(app),io=new Server(http),clients=[];
     io.on('connection',s=>s.on('join',(room,name)=>{s.data={roomId:room,userId:s.id,userName:name};s.join(room);s.emit('joined');}));
-    registerChat(io,app,(room,id)=>({name:io.sockets.sockets.get(id)?.data.userName||'Guest',avatar:'🐸'}));
+    let clock=Date.now();
+    const chat=registerChat(io,app,(room,id)=>({name:io.sockets.sockets.get(id)?.data.userName||'Guest',avatar:'🐸'}),{now:()=>clock});
     await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));const origin=`http://127.0.0.1:${http.address().port}`;
     t.after(async()=>{clients.forEach(s=>s.disconnect());await new Promise(resolve=>io.close(resolve));});
     const connect=async(room,name)=>{const s=client(origin,{autoConnect:false});clients.push(s);let p=once(s,'connect');s.connect();await p;p=once(s,'joined');s.emit('join',room,name);await p;return s;};
@@ -36,5 +37,9 @@ test('room chat delivers once, preserves history, validates text and isolates fi
     response=await fetch(url(a,'room',image.attachment.id,true));assert.match(response.headers.get('content-type'),/^image\/png/);assert.deepEqual(Buffer.from(await response.arrayBuffer()),png);
     response=await upload(a,'room','fake.html',Buffer.from('<script>alert(1)</script>'));assert.equal((await response.json()).message.attachment.image,false);
     assert.equal((await upload(a,'room','big.bin',Buffer.alloc(5*1024*1024+1))).status,413);
+    clock+=24*60*60*1000;chat.sweepExpired();
+    assert.equal(chat.files.size,0);assert.equal(chat.rooms.get('room').bytes,0);
+    assert.equal((await fetch(url(a,'room',fileMessage.attachment.id))).status,410);
+    assert.equal((await history(b)).find(m=>m.id===fileMessage.id).attachment.expired,true);
     const all=await history(late);assert.equal(all.length,4);assert.ok(all.every((m,i)=>!i||m.sequence>all[i-1].sequence));
 });
