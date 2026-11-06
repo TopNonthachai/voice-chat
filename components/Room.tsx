@@ -4,9 +4,10 @@ import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
 import YoutubeBot from './YoutubeBot';
+import ProfileForm, { Avatar, Profile } from './Profile';
 
 const getSocketUrl = () => {
-    if (['localhost', '127.0.0.1'].includes(window.location.hostname)) return `${window.location.protocol}//${window.location.hostname}:3001`;
+    if (['localhost', '127.0.0.1'].includes(window.location.hostname) && ['3000', '5173'].includes(window.location.port)) return `${window.location.protocol}//${window.location.hostname}:3001`;
     return window.location.origin;
 };
 
@@ -15,11 +16,16 @@ interface PeerUser {
   stream: MediaStream;
 }
 
-const Room: React.FC = () => {
+const Room: React.FC<{ initialProfile: Profile }> = ({ initialProfile }) => {
     const { roomId } = useParams<{ roomId: string }>();
     const navigate = useNavigate();
-    const location = useLocation();
-    const myName = location.state?.userName || 'Guest';
+    const [profile, setProfile] = useState(initialProfile);
+    const profileRef = useRef(profile);
+    profileRef.current = profile;
+    const myName = profile.name;
+    const [editing, setEditing] = useState(false);
+    const [members, setMembers] = useState<Record<string, Profile>>({});
+    const [copied, setCopied] = useState(false);
     const socketUrl = getSocketUrl();
 
     const [peerNames, setPeerNames] = useState<{[key: string]: string}>({});
@@ -27,7 +33,6 @@ const Room: React.FC = () => {
     const [peers, setPeers] = useState<PeerUser[]>([]);
     const [isMuted, setIsMuted] = useState(false);
     const [noiseSuppression, setNoiseSuppression] = useState(true);
-    const [isPNGtuber, setIsPNGtuber] = useState(false);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
     const [remoteScreenStream, setRemoteScreenStream] = useState<MediaStream | null>(null);
@@ -41,6 +46,13 @@ const Room: React.FC = () => {
     const screenPeerRef = useRef<Peer | null>(null);
     const peersMapRef = useRef<Map<string, any>>(new Map());
     const myStreamRef = useRef<MediaStream | null>(null);
+
+    useEffect(() => {
+        if (!editing) return;
+        const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setEditing(false); };
+        document.addEventListener('keydown', close);
+        return () => document.removeEventListener('keydown', close);
+    }, [editing]);
 
     const handleSpeaking = (id: string, isSpeaking: boolean) => {
         setActiveSpeakers(prev => {
@@ -96,9 +108,10 @@ const Room: React.FC = () => {
         socketRef.current = socket;
         socket.on('connect', () => {
             setSocketConnected(true);
-            socket.emit('join-room', roomId, peerRef.current?.id || socket.id, myName);
+            socket.emit('join-room', roomId, peerRef.current?.id || socket.id, profileRef.current.name, profileRef.current);
             socket.emit('music-sync', { roomId });
         });
+        socket.on('room-members', setMembers);
         socket.on('disconnect', () => setSocketConnected(false));
         socket.on('connect_error', () => setSocketConnected(false));
 
@@ -215,7 +228,7 @@ const Room: React.FC = () => {
 
             } catch (err) {
                 console.error("Initialization failed:", err);
-                if (mounted) setVoiceError('Microphone unavailable. You can still watch and listen together. Allow microphone access and reload to join voice.');
+                if (mounted) setVoiceError('ไมโครโฟนยังไม่พร้อม คุณยังฟังเพลงด้วยกันได้ หากต้องการพูดคุย กรุณาอนุญาตไมค์แล้วโหลดหน้าใหม่');
             }
         };
 
@@ -232,7 +245,7 @@ const Room: React.FC = () => {
 
     useEffect(() => {
         if (socketConnected && userId && roomId) {
-            socketRef.current?.emit('join-room', roomId, userId, myName);
+            socketRef.current?.emit('join-room', roomId, userId, myName, profileRef.current);
             socketRef.current?.emit('music-sync', { roomId });
         }
     }, [socketConnected, userId, roomId, myName]);
@@ -297,161 +310,29 @@ const Room: React.FC = () => {
         }
     };
 
-    const copyRoomId = () => {
-        if (roomId) navigator.clipboard.writeText(window.location.href);
+    const copyRoomId = async () => {
+        try { await navigator.clipboard.writeText(window.location.href); setCopied(true); }
+        catch { setVoiceError('คัดลอกลิงก์ไม่ได้ กรุณาคัดลอกจากแถบที่อยู่ของเบราว์เซอร์'); }
     };
 
     const leaveRoom = () => {
         navigate('/');
     };
 
-    return (
-        <div className="flex flex-col h-screen bg-discord-dark">
-            <header className="bg-discord-darkest p-4 shadow-md flex flex-wrap gap-3 justify-between items-center z-10">
-                <div className="flex items-center space-x-3">
-                    <i className="fas fa-hashtag text-discord-muted text-xl"></i>
-                    <h1 className="font-bold text-white tracking-wide">Voice Channel</h1>
-                    <div className="flex items-center space-x-2">
-                        <span className={`h-2 w-2 rounded-full ${socketConnected ? 'bg-green-500' : 'bg-yellow-500 animate-pulse'}`}></span>
-                        <span className="text-xs text-discord-muted">
-                            {socketConnected ? 'Connected' : 'Connecting...'}
-                        </span>
-                    </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                    <button onClick={copyRoomId} className="bg-discord-primary hover:bg-blue-600 text-white px-4 py-2 rounded text-sm font-medium transition">
-                        Copy invite link
-                    </button>
-                    <button
-                        onClick={() => setIsPNGtuber(!isPNGtuber)}
-                        className={`${isPNGtuber ? 'bg-discord-success' : 'bg-discord-darker'} hover:bg-opacity-80 text-white px-4 py-2 rounded text-sm font-medium transition border border-discord-darkest`}
-                    >
-                        PNGtuber: {isPNGtuber ? 'ON' : 'OFF'}
-                    </button>
-                    <button
-                        onClick={toggleNoiseSuppression}
-                        className={`${noiseSuppression ? 'bg-discord-primary' : 'bg-discord-darker'} hover:bg-opacity-80 text-white px-4 py-2 rounded text-sm font-medium transition border border-discord-darkest`}
-                    >
-                        Noise: {noiseSuppression ? 'ON' : 'OFF'}
-                    </button>
-                    <button onClick={leaveRoom} className="bg-discord-danger hover:bg-red-600 text-white px-4 py-2 rounded text-sm font-medium transition">
-                        Disconnect
-                    </button>
-                </div>
-            </header>
-
-            <main className="flex-1 p-4 sm:p-6 overflow-y-auto">
-                {voiceError && <p role="status" className="mb-4 text-yellow-300">{voiceError}</p>}
-                {roomId && socketConnected && <YoutubeBot socket={socketRef.current} roomId={roomId} />}
-
-                {(isScreenSharing && screenStream) || remoteScreenStream ? (
-                    <div className="mb-6 bg-black rounded-lg overflow-hidden border-2 border-discord-primary aspect-video max-w-4xl mx-auto relative group">
-                        <video
-                            autoPlay
-                            playsInline
-                            muted={isScreenSharing}
-                            ref={(video) => {
-                                if (video) {
-                                    video.srcObject = isScreenSharing ? screenStream : remoteScreenStream;
-                                    video.muted = isScreenSharing;
-                                }
-                            }}
-                            className="w-full h-full object-contain"
-                        />
-                        <div className="absolute top-4 left-4 bg-black/60 px-3 py-1 rounded-full text-white text-xs font-bold flex items-center">
-                            <span className="w-2 h-2 bg-red-500 rounded-full mr-2 animate-pulse"></span>
-                            {isScreenSharing ? 'YOU ARE SHARING' : 'LIVE SCREEN'}
-                        </div>
-                    </div>
-                ) : null}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {/* My Card */}
-                    <div className={`bg-discord-darker rounded-lg p-4 flex flex-col items-center justify-center relative border transition-all duration-300 aspect-video ${activeSpeakers.has(userId) ? 'border-discord-success ring-2 ring-discord-success ring-opacity-50' : 'border-discord-darkest'}`}>
-                        <div className={`w-24 h-24 rounded-full flex items-center justify-center mb-4 ${isMuted ? 'bg-discord-danger' : 'bg-discord-success'} relative overflow-hidden ring-4 ring-discord-darkest transition-transform duration-100 ${isPNGtuber && activeSpeakers.has(userId) ? 'scale-110 -translate-y-2' : ''}`}>
-                            {myStream && (
-                                <div className="absolute inset-0 opacity-50">
-                                    <AudioVisualizer
-                                        stream={myStream}
-                                        isMuted={isMuted}
-                                        height={96}
-                                        onSpeaking={(isSpeaking) => handleSpeaking(userId, isSpeaking)}
-                                    />
-                                </div>
-                            )}
-                            <img
-                                src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${userId || 'me'}`}
-                                alt="Me"
-                                className={`w-20 h-20 rounded-full border-4 border-discord-darker z-10 bg-discord-dark ${isPNGtuber && !activeSpeakers.has(userId) ? 'grayscale' : ''}`}
-                            />
-                        </div>
-                        <div className="font-semibold text-white mb-1 flex items-center">
-                            {myName} (You)
-                            {activeSpeakers.has(userId) && !isMuted && <span className="ml-2 w-2 h-2 bg-discord-success rounded-full animate-ping"></span>}
-                        </div>
-                        <div className="absolute bottom-4 right-4 flex space-x-2">
-                            <button onClick={toggleMute} className={`w-10 h-10 rounded-full flex items-center justify-center transition shadow-lg ${isMuted ? 'bg-white text-discord-danger' : 'bg-discord-dark text-white'}`}>
-                                <i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`}></i>
-                            </button>
-                        </div>
-                    </div>
-
-                    {/* Remote Peers */}
-                    {peers.map((peer) => (
-                        <div key={peer.userId} className={`bg-discord-darker rounded-lg p-4 flex flex-col items-center justify-center border transition-all duration-300 aspect-video ${activeSpeakers.has(peer.userId) ? 'border-discord-success ring-2 ring-discord-success ring-opacity-50' : 'border-discord-darkest'}`}>
-                            <div className={`w-24 h-24 rounded-full bg-discord-primary flex items-center justify-center mb-4 relative overflow-hidden ring-4 ring-discord-darkest transition-transform duration-100 ${isPNGtuber && activeSpeakers.has(peer.userId) ? 'scale-110 -translate-y-2' : ''}`}>
-                                <div className="absolute inset-0 opacity-50">
-                                    <AudioVisualizer
-                                        stream={peer.stream}
-                                        isMuted={false}
-                                        height={96}
-                                        onSpeaking={(isSpeaking) => handleSpeaking(peer.userId, isSpeaking)}
-                                    />
-                                </div>
-                                <img
-                                    src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${peer.userId}`}
-                                    alt="Peer"
-                                    className={`w-20 h-20 rounded-full border-4 border-discord-darker z-10 bg-discord-dark ${isPNGtuber && !activeSpeakers.has(peer.userId) ? 'grayscale' : ''}`}
-                                />
-                                <audio
-                                    autoPlay
-                                    playsInline
-                                    ref={(audio) => {
-                                        if (audio && audio.srcObject !== peer.stream) {
-                                            audio.srcObject = peer.stream;
-                                            audio.muted = false;
-                                        }
-                                    }}
-                                />
-                            </div>
-                            <div className="font-semibold text-white mb-1 flex items-center">
-                                {peerNames[peer.userId] || 'Guest'}
-                                {activeSpeakers.has(peer.userId) && <span className="ml-2 w-2 h-2 bg-discord-success rounded-full animate-ping"></span>}
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            </main>
-
-            {/* Control Bar */}
-            <footer className="bg-discord-darkest p-4 flex justify-center space-x-4">
-                <button
-                    onClick={toggleMute}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${isMuted ? 'bg-discord-danger text-white' : 'bg-discord-dark hover:bg-discord-muted text-white'}`}
-                    title={isMuted ? 'Unmute' : 'Mute'}
-                >
-                    <i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'} text-xl`}></i>
-                </button>
-                <button
-                    onClick={toggleScreenShare}
-                    className={`w-12 h-12 rounded-full flex items-center justify-center transition-all ${isScreenSharing ? 'bg-discord-success text-white' : 'bg-discord-dark hover:bg-discord-muted text-white'}`}
-                    title="Share Screen"
-                >
-                    <i className="fas fa-desktop text-xl"></i>
-                </button>
-            </footer>
-        </div>
-    );
+    const ownId = userId || socketRef.current?.id || '';
+    return <div className="room-shell">
+        <header className="room-header"><a className="wordmark" href="#/">mellow<span>●</span></a><div className="room-heading"><span className="eyebrow">YOUR SHARED CORNER</span><strong>ห้องของพวกเรา</strong></div><span className="connection"><i className={`status-dot ${socketConnected ? 'on' : ''}`} />{socketConnected ? 'เชื่อมต่อแล้ว' : 'กำลังเชื่อมต่อ…'}</span>
+        <div className="header-actions"><button className="btn secondary" onClick={copyRoomId}>{copied ? '✓ คัดลอกแล้ว' : '↗ ชวนเพื่อน'}</button><button className="profile-chip" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} /><span>{profile.name}</span><span>⌄</span></button><button className="btn ghost" onClick={leaveRoom}>ออกจากห้อง</button></div></header>
+        <main className="room-main"><div className="room-intro"><div><span className="eyebrow">SETTLE IN. STAY A WHILE.</span><h1>เปิดเพลง แล้วมาอยู่ด้วยกัน<span className="accent">.</span></h1></div><p>ส่งเพลงให้กัน เหมือนนั่งอยู่ข้าง ๆ</p></div>
+        {voiceError && <p role="status" className="notice">{voiceError}</p>}
+        {roomId && socketConnected ? <YoutubeBot socket={socketRef.current} roomId={roomId} /> : <div className="waiting-panel">กำลังเชื่อมต่อห้องฟังเพลง…</div>}
+        {((isScreenSharing && screenStream) || remoteScreenStream) && <section className="screen-panel"><span className="eyebrow">{isScreenSharing ? 'YOUR SCREEN' : 'LIVE SCREEN'}</span><video autoPlay playsInline muted={isScreenSharing} ref={video=>{if(video) video.srcObject=isScreenSharing?screenStream:remoteScreenStream;}} /></section>}
+        <section className="people-panel"><div className="people-heading"><div><span className="eyebrow">THE GOOD COMPANY</span><h2>เพื่อนในห้อง <span className="count">{Object.keys(members).length || 1}</span></h2></div><div className="voice-controls"><button className="btn ghost" disabled={!myStream} onClick={toggleNoiseSuppression}>ลดเสียงรบกวน: {noiseSuppression?'เปิด':'ปิด'}</button><button className="btn ghost" disabled={!userId} onClick={toggleScreenShare}>{isScreenSharing?'หยุดแชร์จอ':'แชร์หน้าจอ'}</button></div></div>
+        <div className="people-list"><div className={`person-card own ${profile.status?.trim() ? '' : 'no-status'}`}><button className="own-profile" aria-label="แก้ไขโปรไฟล์และ status" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} speaking={activeSpeakers.has(ownId) && !isMuted} motion={profile.motion} /><strong>{profile.name}</strong><span className="person-status">{profile.status || ''}</span></button><div className="own-card-actions"><button className={`mic-button ${isMuted ? 'muted-mic' : ''}`} disabled={!myStream} onClick={toggleMute} aria-pressed={isMuted} aria-label={!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'} title={!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}><i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`} aria-hidden="true" />{!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}</button><button className="text-link" onClick={()=>setEditing(true)}>แก้ไขโปรไฟล์</button></div></div>
+        {Object.entries(members).filter(([id])=>id!==ownId && id!==socketRef.current?.id).map(([id,member])=>{const peer=peers.find(p=>p.userId===id);return <div className={`person-card ${member.status?.trim() ? '' : 'no-status'}`} key={id}><Avatar avatar={member.avatar} speaking={activeSpeakers.has(id)} motion={member.motion} /><strong>{member.name}</strong><span className="person-status">{member.status || ''}</span>{peer && <><audio autoPlay playsInline ref={audio=>{if(audio && audio.srcObject!==peer.stream) audio.srcObject=peer.stream;}} /><div className="visualizer-hidden"><AudioVisualizer stream={peer.stream} isMuted={false} onSpeaking={speaking=>handleSpeaking(id,speaking)} /></div></>}</div>;})}</div>
+        {myStream && <div className="visualizer-hidden"><AudioVisualizer stream={myStream} isMuted={isMuted} onSpeaking={speaking=>handleSpeaking(ownId,speaking)} /></div>}
+        </section><footer className="room-footer">mellow / A LITTLE CLOSER, ONE SONG AT A TIME <span>ฟังด้วยกัน ใกล้กันอีกนิด</span></footer></main>
+        {editing && <div className="modal-backdrop" onClick={()=>setEditing(false)}><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={e=>e.stopPropagation()}><span className="eyebrow">MAKE IT YOURS</span><h2 id="profile-title">ตัวคุณในห้องนี้</h2><ProfileForm initial={profile} label="บันทึกตัวแทน" onCancel={()=>setEditing(false)} onSave={next=>{setProfile(next); socketRef.current?.emit('profile-update',next); setEditing(false);}} /></section></div>}
+    </div>;
 };
-
 export default Room;

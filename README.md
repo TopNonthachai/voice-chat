@@ -1,4 +1,4 @@
-# VoiceCord — watch and listen together
+# mellow — watch and listen together
 
 React/Vite frontend with an Express + Socket.IO server and optional PeerJS voice chat.
 
@@ -65,3 +65,29 @@ npm run build
 ```
 
 Tests use real local Socket.IO connections to cover shared state, late join, pause, seek to zero, queue operations, duplicate end reports, room isolation and reconnection. Browser QA verifies the embedded player and shared pause control. Cross-device playback and voice still need testing with friends on separate networks.
+
+## mellow update
+
+Invite links show a required name and avatar form. Edit the profile from the room header. Twelve character presets, random selection, and JPG/PNG/WebP uploads (up to 3 MB, cropped into a small JPEG) are available. Avatars are shared with room participants; your chosen profile is saved locally. PNGtuber is labelled as movement while speaking. No (You) suffix is shown.
+
+Click the video surface to play/pause for the whole room. The embedded player does not intercept clicks. Join listening and leave listening are local actions, separate from room playback. Leaving unmounts the player; rejoining catches up.
+
+Shuffle consumes a server-owned bag and plays every song once before the next round. Repeat queue starts a new round after exhaustion. Without repeat, playback stops. Duplicate video entries are rejected; manually selecting a previously heard song is an explicit replay.
+
+The new interface uses cream, olive and terracotta, responsive layouts and Thai labels. Profile sharing, shuffle rounds, duplicate end reports and repeat behavior are covered by integration tests. Browser QA covers invitation setup, both clients seeing shared modes, video click pause/play, and leaving listening while the room continues.
+
+If port 3001 is occupied, set PORT to another port and open that backend directly. The Vite development server on 3000/5173 still uses backend 3001; production uses its current origin.
+
+## Profiles and activity
+
+Profiles have an optional status (up to 80 characters), empty by default. Edit or clear it from the profile form. The microphone toggle is on your own profile card. The UI calls the shared space a room.
+
+The queue sidebar has Queue and History tabs. The server records successful add/remove/reorder/select/play/pause/seek/skip/shuffle/repeat actions with the participant name and server timestamp. Automatic transitions are attributed to the system. Everyone in the room, including late joiners, receives the same last 100 entries; history resets on server restart. Invalid commands and duplicate end reports do not create entries. Removed song details remain in history.
+
+## Room chat and attachments
+
+The sidebar includes Queue, Chat and History tabs. Chat shows the sender name, avatar and timestamp, retains the last 100 messages per room, and badges unread messages while another tab is open. Enter sends; Shift+Enter adds a line break. Text is limited to 1,000 characters and rendered as plain text.
+
+The attachment button supports files up to 5 MB, optional captions, raster image previews and downloads. Files are kept in server memory (20 MB per room, 100 MB total). Downloads and previews require an active connection in the same room. Files attached to messages removed from the 100-message history are also removed. All messages and files disappear when the server restarts or deploys. No external storage or API key is required.
+
+Client submission IDs prevent duplicate delivery when retrying the same send on an existing room identity. Server-side checks reject blank or oversized messages, files over the limit, and requests from outside the room. Integration tests cover text delivery, retries, late join history, room isolation, attachment download, PNG preview and upload size limits. Browser QA covers sending a message and attaching/sending a sample text file from the chat tab.

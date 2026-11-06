@@ -1,7 +1,7 @@
 import React from 'react';
 import { HashRouter as Router, Routes, Route } from 'react-router-dom';
 import Landing from './components/Landing';
-import Room from './components/Room';
+import RoomEntry from './components/RoomEntry';
 import ServerGuide from './components/ServerGuide';
 
 const App: React.FC = () => {
@@ -9,7 +9,7 @@ const App: React.FC = () => {
     <Router>
       <Routes>
         <Route path="/" element={<Landing />} />
-        <Route path="/room/:roomId" element={<Room />} />
+        <Route path="/room/:roomId" element={<RoomEntry />} />
         <Route path="/server-setup" element={<ServerGuide />} />
       </Routes>
     </Router>
