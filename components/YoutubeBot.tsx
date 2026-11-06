@@ -1,177 +1,140 @@
-import React, { useEffect, useState, useRef } from 'react';
-import ReactPlayer from 'react-player'; 
+import React, { useEffect, useRef, useState } from 'react';
+import ReactPlayer from 'react-player';
 import { Socket } from 'socket.io-client';
 
-const ReactPlayerAny = ReactPlayer as any;
-
-interface YoutubeBotProps {
-    socket: Socket | null;
-    roomId: string;
-    onClose: () => void;
+interface Track { id: string; videoId: string; title: string }
+interface MusicState {
+    queue: Track[]; currentId: string | null; playing: boolean;
+    position: number; updatedAt: number; revision: number;
 }
+const time = (seconds: number) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, '0')}`;
 
-interface VideoState {
-    url: string;
-    playing: boolean;
-    played: number;
-    timestamp: number;
-}
-
-const YoutubeBot: React.FC<YoutubeBotProps> = ({ socket, roomId, onClose }) => {
-    const [url, setUrl] = useState('https://www.youtube.com/watch?v=LXb3EKWsInQ');
-    const [playing, setPlaying] = useState(false);
-    const [inputUrl, setInputUrl] = useState('');
-    const [isReady, setIsReady] = useState(false);
-    
-    const playerRef = useRef<any>(null);
-    const isRemoteUpdate = useRef(false);
-
-    // ฟังก์ชันช่วยดึง Video ID จาก URL ของ YouTube
-    const getYouTubeID = (url: string) => {
-        const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
-        const match = url.match(regExp);
-        return (match && match[2].length === 11) ? match[2] : url;
+const YoutubeBot: React.FC<{ socket: Socket | null; roomId: string }> = ({ socket, roomId }) => {
+    const [state, setState] = useState<MusicState | null>(null);
+    const [input, setInput] = useState('');
+    const [error, setError] = useState('');
+    const [enabled, setEnabled] = useState(false);
+    const [ready, setReady] = useState(false);
+    const [position, setPosition] = useState(0);
+    const [duration, setDuration] = useState(0);
+    const [volume, setVolume] = useState(1);
+    const player = useRef<HTMLVideoElement>(null);
+    const latest = useRef<MusicState | null>(null);
+    const receivedAt = useRef(0);
+    const readyRef = useRef(false);
+    const current = state?.queue.find(item => item.id === state.currentId);
+    const targetPosition = () => {
+        const value = latest.current;
+        return value ? value.position + (value.playing ? (performance.now() - receivedAt.current) / 1000 : 0) : 0;
     };
-
+    const align = () => {
+        if (!readyRef.current || !player.current || !latest.current) return;
+        const target = targetPosition();
+        if (Math.abs(player.current.currentTime - target) > 1.2) player.current.currentTime = target;
+    };
     useEffect(() => {
-        if (!socket) {
-            console.warn("⚠️ [YoutubeBot] No socket connection");
-            return;
-        }
-
-        const handleUpdate = (state: VideoState) => {
-            const currentID = getYouTubeID(url);
-            const incomingID = getYouTubeID(state.url);
-
-            // ถ้าเป็น Video เดียวกันและกำลังเล่น/หยุดเหมือนกัน ให้ข้ามไป
-            if (currentID === incomingID && state.playing === playing) {
-                return;
+        if (!socket) return;
+        const update = (next: MusicState) => {
+            if (latest.current && next.revision < latest.current.revision) return;
+            if (latest.current?.currentId !== next.currentId) {
+                readyRef.current = false;
+                setReady(false);
+                setDuration(0);
+                setError('');
             }
-
-            isRemoteUpdate.current = true;
-            console.log(`📥 [YoutubeBot] Syncing: ${incomingID} (Playing: ${state.playing})`);
-            
-            if (currentID !== incomingID) {
-                setUrl(state.url);
-                setPlaying(state.playing);
-            } else {
-                setPlaying(state.playing);
-            }
-            
-            if (playerRef.current && state.played > 0) {
-                const currentTime = playerRef.current.getCurrentTime();
-                if (Math.abs(currentTime - state.played) > 5) {
-                    playerRef.current.seekTo(state.played, 'seconds');
-                }
-            }
-            
-            // ปลดล็อค Remote Update หลังจาก UI อัปเดตเสร็จ
-            setTimeout(() => { isRemoteUpdate.current = false; }, 1500);
+            latest.current = next;
+            receivedAt.current = performance.now();
+            setState(next);
+            setPosition(next.position);
+            align();
         };
-
-        socket.on('youtube-update', handleUpdate);
-        socket.on('youtube-sync-state', handleUpdate);
-
+        const sync = () => socket.emit('music-sync', { roomId });
+        socket.on('music-state', update);
+        socket.on('connect', sync);
+        sync();
+        const timer = window.setInterval(() => { align(); setPosition(targetPosition()); }, 1000);
+        const visible = () => { if (document.visibilityState === 'visible') sync(); };
+        document.addEventListener('visibilitychange', visible);
         return () => {
-            socket.off('youtube-update');
-            socket.off('youtube-sync-state');
+            socket.off('music-state', update);
+            socket.off('connect', sync);
+            clearInterval(timer);
+            document.removeEventListener('visibilitychange', visible);
         };
-    }, [socket, url, playing]);
+    }, [socket, roomId]);
 
-    const emitChange = (newPlaying: boolean) => {
-        // ถ้าเป็นการอัปเดตที่มาจากคนอื่น (Remote) ห้ามส่งกลับไปหา Server (ป้องกัน Loop)
-        if (isRemoteUpdate.current || !socket) return;
-        
-        const played = playerRef.current ? playerRef.current.getCurrentTime() : 0;
-        const state: VideoState = {
-            url,
-            playing: newPlaying,
-            played,
-            timestamp: Date.now()
-        };
-        console.log(`📤 [YoutubeBot] Emitting Change: ${getYouTubeID(url)}`);
-        socket.emit('youtube-change', { roomId, videoState: state });
+    const command = (action: string, extra: Record<string, unknown> = {}, onSuccess?: () => void) => {
+        if (!socket?.connected) { setError('Reconnecting to the room…'); return; }
+        setError('');
+        socket.timeout(8000).emit('music-command', {
+            roomId, action, currentId: latest.current?.currentId, revision: latest.current?.revision, ...extra
+        }, (timeout: Error | null, result: { error?: string }) => {
+            if (timeout) { setError('No response. Reconnect and check the queue before trying again.'); return; }
+            if (result?.error) setError(result.error);
+            else onSuccess?.();
+        });
     };
-
-    const handleUrlSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        const cleanUrl = inputUrl.trim();
-        console.log(`👤 [User] Processing URL: ${cleanUrl}`);
-        
-        if (!cleanUrl) return;
-
-        // บังคับเปลี่ยน State ภายในก่อน
-        setUrl(cleanUrl);
-        setPlaying(true);
-        setIsReady(false);
-        
-        if (socket && socket.connected) {
-            console.log("📤 [YoutubeBot] Emitting youtube-change to server...");
-            const state = { 
-                url: cleanUrl, 
-                playing: true, 
-                played: 0, 
-                timestamp: Date.now() 
-            };
-            socket.emit('youtube-change', { roomId, videoState: state });
-            setInputUrl('');
-        } else {
-            console.error("❌ [YoutubeBot] Cannot emit: Socket not connected!");
-            alert("Error: Signaling server not connected. Please refresh.");
+    const enable = () => {
+        setEnabled(true);
+        align();
+        if (latest.current?.playing) {
+            player.current?.play()?.catch(() => setError('Press Join audio again to allow playback in this browser.'));
         }
     };
 
-    return (
-        <div className="bg-black/90 p-4 rounded-lg border border-discord-primary w-full max-w-2xl mb-4 shadow-2xl relative">
-            <div className="flex justify-between items-center mb-3">
-                <div className="flex items-center text-white">
-                    <i className="fab fa-youtube text-red-500 text-xl mr-2"></i>
-                    <span className="font-bold">Video Player</span>
-                    {!isReady && <span className="ml-2 text-xs text-yellow-400 animate-pulse">(Loading...)</span>}
-                </div>
-                <button 
-                    onClick={onClose}
-                    className="text-gray-400 hover:text-white text-sm bg-gray-800 px-2 py-1 rounded hover:bg-red-600 transition"
-                >
-                    Close
-                </button>
-            </div>
-
-            <div 
-                className="bg-black rounded overflow-hidden relative group border-2 border-red-500" 
-                style={{ width: '100%', height: '360px' }}
-            >
-                <ReactPlayerAny
-                    ref={playerRef}
-                    url={url}
-                    playing={playing}
-                    controls={true}
-                    width="100%"
-                    height="100%"
-                    onReady={() => {
-                        console.log("✅ [YoutubeBot] Player Ready");
-                        setIsReady(true);
-                    }}
-                    onPlay={() => emitChange(true)}
-                    onPause={() => emitChange(false)}
-                    onError={(e: any) => console.error("❌ [YoutubeBot] Error:", e)}
-                />
-            </div>
-
-            <form onSubmit={handleUrlSubmit} className="mt-3 flex gap-2">
-                <input 
-                    type="text" 
-                    value={inputUrl}
-                    onChange={(e) => setInputUrl(e.target.value)}
-                    placeholder="Paste YouTube Link here..." 
-                    className="flex-1 bg-gray-800 text-white text-sm px-3 py-2 rounded border border-gray-700 focus:border-red-500 outline-none"
-                />
-                <button type="submit" className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded text-sm font-bold transition-all active:scale-95">
-                    Load
-                </button>
-            </form>
+    return <section className="bg-discord-darkest rounded-xl p-4 mb-6 max-w-5xl mx-auto border border-discord-light">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+            <div><h2 className="text-xl font-bold text-white">Listen together</h2>
+                <p className="text-sm text-gray-400">One room, one shared queue. Everyone can control playback.</p></div>
+            <button onClick={enable} className="bg-discord-primary text-white rounded px-4 py-2">{enabled ? 'Rejoin audio / sync' : 'Join audio'}</button>
         </div>
-    );
+        {current ? <div className="bg-black rounded overflow-hidden" style={{ aspectRatio: '16/9', minHeight: 200 }}>
+            <ReactPlayer key={current.id} ref={player} src={`https://www.youtube.com/watch?v=${current.videoId}`}
+                playing={Boolean(state?.playing && enabled)} volume={volume} controls={false} playsInline width="100%" height="100%"
+                onLoadedMetadata={() => { readyRef.current = true; setReady(true); align(); }}
+                onDurationChange={() => setDuration(player.current?.duration || 0)}
+                onTimeUpdate={() => { const d = player.current?.duration; if (d && Number.isFinite(d)) setDuration(d); }}
+                onEnded={() => {
+                    if (enabled && latest.current?.currentId === current.id)
+                        command('ended', { duration: player.current?.duration });
+                }}
+                onError={() => setError('This video could not play here. It may be restricted or embedding may be disabled. Try another video or skip.')} />
+        </div> : <div className="rounded bg-black/30 p-10 text-center text-gray-400">Paste a YouTube video link below to start the room.</div>}
+        {current && <div className="mt-3 space-y-3">
+            <p className="text-sm text-gray-400">{!ready ? 'Loading video…' : !enabled ? 'Press Join audio to hear this room.' : state?.playing ? 'Playing together' : 'Paused for everyone'}</p>
+            <div className="flex items-center gap-3">
+                <button disabled={!ready} onClick={() => { setEnabled(true); command(state?.playing ? 'pause' : 'play'); }} className="bg-discord-primary text-white rounded px-4 py-2 disabled:opacity-50">{state?.playing ? 'Pause all' : 'Play all'}</button>
+                <button onClick={() => command('next')} className="bg-discord-light text-white rounded px-4 py-2">Next</button>
+                <span className="text-sm tabular-nums">{time(position)} / {time(duration)}</span>
+            </div>
+            <input aria-label="Seek for everyone" type="range" min="0" max={duration || 1} step="0.5"
+                disabled={!ready || !duration} value={Math.min(position, duration || 0)}
+                onChange={e => command('seek', { position: Number(e.target.value) })} className="w-full" />
+            <label className="flex items-center gap-3 text-sm">Your volume
+                <input aria-label="Your volume" type="range" min="0" max="1" step="0.05" value={volume}
+                    onChange={e => setVolume(Number(e.target.value))} />
+            </label>
+        </div>}
+        <form className="flex flex-wrap gap-2 mt-4" onSubmit={e => {
+            e.preventDefault(); const submitted = input.trim();
+            if (submitted) command('add', { url: submitted }, () => setInput(value => value.trim() === submitted ? '' : value));
+        }}>
+            <input aria-label="YouTube video link" value={input} onChange={e => setInput(e.target.value)}
+                placeholder="Paste a YouTube video link…" className="flex-1 min-w-0 bg-discord-dark rounded px-3 py-2 text-white" />
+            <button disabled={!input.trim()} className="bg-red-600 disabled:opacity-50 text-white px-4 py-2 rounded">Add to queue</button>
+        </form>
+        {error && <p role="alert" className="text-yellow-300 mt-3">{error}</p>}
+        <h3 className="font-bold mt-5 mb-2">Shared queue ({state?.queue.length || 0})</h3>
+        <ol className="space-y-2 max-h-72 overflow-y-auto">
+            {state?.queue.map((item, index) => <li key={item.id} className={`flex flex-wrap items-center gap-2 p-2 rounded ${item.id === current?.id ? 'bg-discord-primary/30' : 'bg-discord-dark'}`}>
+                <img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" className="w-16 rounded" />
+                <button onClick={() => command('select', { id: item.id })} className="flex-1 text-left text-sm">{index + 1}. {item.title}{item.id === current?.id ? ' · Current' : ''}</button>
+                <button aria-label={`Move song ${index + 1} up`} disabled={index === 0} onClick={() => command('move', { id: item.id, direction: -1 })} className="p-2 disabled:opacity-30">↑</button>
+                <button aria-label={`Move song ${index + 1} down`} disabled={index === state.queue.length - 1} onClick={() => command('move', { id: item.id, direction: 1 })} className="p-2 disabled:opacity-30">↓</button>
+                <button aria-label={`Remove song ${index + 1}`} onClick={() => command('remove', { id: item.id })} className="p-2 text-red-300">Remove</button>
+            </li>)}
+        </ol>
+        <p className="text-xs text-gray-400 mt-3">Queue songs with individual video links. The queue resets when the server restarts.</p>
+    </section>;
 };
-
 export default YoutubeBot;

@@ -1,0 +1,37 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { io: client } = require('socket.io-client');
+const { server, io } = require('../server.js');
+const { videoId } = require('../music-server.cjs');
+const { once } = require('node:events');
+test('validates YouTube URLs', () => {
+    for (const input of ['https://youtu.be/LXb3EKWsInQ?t=2','https://youtube.com/shorts/LXb3EKWsInQ','https://www.youtube.com/watch?v=LXb3EKWsInQ']) assert.equal(videoId(input), 'LXb3EKWsInQ');
+    for (const input of [null,'bad','https://evil.com/watch?v=LXb3EKWsInQ','https://youtube.com/playlist?list=123']) assert.equal(videoId(input), null);
+});
+test('two clients sync, late join, pause, zero seek, queue, duplicate ended, isolation and reconnect', { timeout: 15000 }, async t => {
+    const clients = [];
+    t.after(async () => { clients.forEach(s => s.disconnect()); await new Promise(resolve => io.close(resolve)); });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    const join = async (s, room) => { const p = once(s, 'existing-users'); s.emit('join-room', room, s.id, 'Test'); await p; };
+    const connect = async room => { const s = client(origin, { autoConnect:false, reconnection:false }); clients.push(s); const p=once(s,'connect');s.connect();await p;await join(s,room);return s; };
+    const sync = async (s,room='music') => { const p=once(s,'music-state');s.emit('music-sync',{roomId:room});return (await p)[0]; };
+    const cmd = (s,action,extra={},room='music') => new Promise((resolve,reject) => s.timeout(2000).emit('music-command',{roomId:room,action,...extra},(err,res)=>err?reject(err):resolve(res)));
+    const a=await connect('music'),b=await connect('music'),other=await connect('other');
+    assert.ok((await cmd(other,'add',{url:'LXb3EKWsInQ'})).error);
+    assert.ok((await cmd(a,'add',{url:'bad'})).error);
+    const broadcast=once(b,'music-state');await cmd(a,'add',{url:'LXb3EKWsInQ'});let state=(await broadcast)[0];
+    const first=state.currentId;assert.equal(state.queue.length,1);
+    await cmd(a,'seek',{currentId:first,position:42});const c=await connect('music');state=await sync(c);assert.ok(state.position>=42&&state.position<45);
+    await cmd(b,'pause',{currentId:first});assert.equal((await sync(a)).playing,false);
+    await cmd(b,'seek',{currentId:first,position:0});assert.equal((await sync(a)).position,0);
+    await cmd(a,'add',{url:'M7lc1UVf-VE'});state=await sync(a);const second=state.queue[1].id;
+    await cmd(a,'move',{id:second,direction:-1});assert.equal((await sync(b)).queue[0].id,second);
+    await cmd(a,'move',{id:second,direction:1});await cmd(a,'play',{currentId:first});await cmd(a,'seek',{currentId:first,position:99});state=await sync(a);
+    await Promise.all([a,b].map(s=>cmd(s,'ended',{currentId:first,revision:state.revision,duration:100})));
+    assert.equal((await sync(b)).currentId,second);assert.ok((await cmd(a,'pause',{currentId:first})).error);
+    await cmd(a,'remove',{id:second});assert.equal((await sync(b)).currentId,first);
+    assert.equal((await sync(other,'other')).queue.length,0);
+    a.disconnect();const p=once(a,'connect');a.connect();await p;await join(a,'music');assert.equal((await sync(a)).currentId,first);
+    await cmd(a,'remove',{id:first});state=await sync(b);assert.equal(state.currentId,null);assert.equal(state.playing,false);
+});

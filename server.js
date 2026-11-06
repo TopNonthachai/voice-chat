@@ -3,7 +3,7 @@ const app = express();
 const server = require('http').Server(app);
 const io = require('socket.io')(server, {
     cors: {
-        origin: "*", 
+        origin: "*",
         methods: ["GET", "POST"]
     },
     transports: ['websocket', 'polling']
@@ -11,42 +11,43 @@ const io = require('socket.io')(server, {
 const path = require('path');
 
 // 1. ประกาศตัวแปรเก็บสถานะ (ต้องอยู่นอก io.on)
-const roomVideoStates = {}; 
-const roomAudioStates = {}; // เก็บสถานะ Audio Bot
-const roomUsers = {}; // [ใหม่] ตัวแปรเก็บชื่อคนในห้อง { roomId: { userId: "Name" } }
+require('./music-server.cjs').registerMusic(io);
+const roomVideoStates = Object.create(null);
+const roomAudioStates = Object.create(null); // เก็บสถานะ Audio Bot
+const roomUsers = Object.create(null); // [ใหม่] ตัวแปรเก็บชื่อคนในห้อง { roomId: { userId: "Name" } }
 
 // --- ส่วน Socket.io ---
 io.on('connection', socket => {
     console.log('New socket connection:', socket.id);
 
     // เมื่อ User เข้าห้อง
+    const leave = () => {
+        const { roomId, userId } = socket.data;
+        if (!roomId) return;
+        if (roomUsers[roomId]) delete roomUsers[roomId][userId];
+        socket.to(roomId).emit('user-disconnected', userId);
+        socket.leave(roomId);
+    };
+    socket.on('disconnect', leave);
     socket.on('join-room', (roomId, userId, userName) => {
-        socket.join(roomId);
-
-        // 1. บันทึกชื่อคนใหม่ลงในห้อง
-        if (!roomUsers[roomId]) roomUsers[roomId] = {};
-        roomUsers[roomId][userId] = userName;
-
-        // 2. บอกคนอื่นในห้องว่า "มีคนใหม่มา ชื่อ..." (ส่งไปทั้งก้อน object)
-        socket.to(roomId).emit('user-connected', { userId, userName });
-
-        // 3. [สำคัญ] บอกคนใหม่ว่า "ในห้องมีใครอยู่บ้างและชื่ออะไร"
+        if (typeof roomId !== 'string' || !roomId.length || roomId.length > 128 ||
+            typeof userId !== 'string' || !userId.length || userId.length > 128) return;
+        if (socket.data.roomId !== roomId || socket.data.userId !== userId) {
+            leave();
+            socket.data = { roomId, userId };
+            socket.join(roomId);
+            if (!roomUsers[roomId]) roomUsers[roomId] = Object.create(null);
+            roomUsers[roomId][userId] = typeof userName === 'string' ? userName.slice(0, 80) : 'Guest';
+            socket.to(roomId).emit('user-connected', { userId, userName: roomUsers[roomId][userId] });
+        }
         socket.emit('existing-users', roomUsers[roomId]);
-
-        // ... (ส่วน Youtube/Audio Sync เดิม ปล่อยไว้) ...
-        if (roomVideoStates[roomId]) socket.emit('youtube-sync-state', roomVideoStates[roomId]);
         if (roomAudioStates[roomId]) socket.emit('audio-sync-state', roomAudioStates[roomId]);
-
-        socket.on('disconnect', () => {
-            // ลบชื่อออกเมื่อหลุด
-            if (roomUsers[roomId]) delete roomUsers[roomId][userId];
-            socket.to(roomId).emit('user-disconnected', userId);
-        });
     });
 
     // --- ส่วนจัดการ Youtube Bot ---
     socket.on('youtube-change', (data) => {
-        const { roomId, videoState } = data;
+        const { roomId, videoState } = data || {};
+        if (!socket.rooms.has(roomId) || !videoState) return;
         console.log(`📺 [Youtube] Room ${roomId} changed state to:`, videoState.url);
         roomVideoStates[roomId] = videoState;
         socket.to(roomId).emit('youtube-update', videoState);
@@ -54,7 +55,8 @@ io.on('connection', socket => {
 
     // --- ส่วนจัดการ Audio Bot ---
     socket.on('audio-change', (data) => {
-        const { roomId, audioState } = data;
+        const { roomId, audioState } = data || {};
+        if (!socket.rooms.has(roomId) || !audioState) return;
         console.log(`🎵 [Audio] Room ${roomId} changed state to:`, audioState.url);
         roomAudioStates[roomId] = audioState;
         socket.to(roomId).emit('audio-update', audioState);
@@ -62,12 +64,14 @@ io.on('connection', socket => {
 
     // --- ส่วนจัดการ Screen Sharing ---
     socket.on('screen-start', (data) => {
-        const { roomId, userId } = data;
+        const { roomId, userId } = data || {};
+        if (!socket.rooms.has(roomId)) return;
         console.log(`🖥️ [Screen] User ${userId} started sharing in ${roomId}`);
         socket.to(roomId).emit('screen-shared', { userId });
     });
 
     socket.on('screen-stop', (roomId) => {
+        if (!socket.rooms.has(roomId)) return;
         console.log(`🖥️ [Screen] Stopped sharing in ${roomId}`);
         socket.to(roomId).emit('screen-stopped');
     });
@@ -83,6 +87,7 @@ app.use((req, res) => {
 
 // ใช้ Port จากระบบ (Render) หรือ 3001
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+if (require.main === module) server.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
 });
+module.exports = { server, io };
