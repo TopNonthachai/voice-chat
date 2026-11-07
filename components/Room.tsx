@@ -39,7 +39,8 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     const [peerNames, setPeerNames] = useState<{[key: string]: string}>({});
     const [myStream, setMyStream] = useState<MediaStream | null>(null);
     const [peers, setPeers] = useState<PeerUser[]>([]);
-    const [isMuted, setIsMuted] = useState(false);
+    const [isMuted, setIsMuted] = useState(true);
+    const [isDeafened, setIsDeafened] = useState(false);
     const [noiseSuppression, setNoiseSuppression] = useState(true);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
@@ -48,6 +49,11 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     const [userId, setUserId] = useState<string>('');
     const [socketConnected, setSocketConnected] = useState(false);
     const [voiceError, setVoiceError] = useState('');
+    const [micBusy, setMicBusy] = useState(false);
+    const micBusyRef = useRef(false);
+    const aliveRef = useRef(true);
+    const silentRef = useRef<MediaStream | null>(null);
+    const silentContextRef = useRef<AudioContext | null>(null);
 
     const socketRef = useRef<Socket | null>(null);
     const peerRef = useRef<Peer | null>(null);
@@ -75,43 +81,63 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
         });
     };
 
-    const toggleNoiseSuppression = async () => {
-        const newState = !noiseSuppression;
-        setNoiseSuppression(newState);
+    const releaseMicrophone = () => {
+        const current = myStreamRef.current;
+        // Keep a silent sender negotiated, without holding the physical microphone.
+        if (current && current !== silentRef.current) current.getTracks().forEach(track => track.stop());
+        const silent = silentRef.current;
+        myStreamRef.current = silent;
+        setMyStream(silent);
+        setIsMuted(true);
+        const track = silent?.getAudioTracks()[0];
+        if (track) peersMapRef.current.forEach(call => {
+            const sender = call.peerConnection?.getSenders().find((sender: RTCRtpSender) => sender.track?.kind === 'audio');
+            sender?.replaceTrack(track).catch(() => {});
+        });
+    };
 
-        // Re-acquire stream with new constraints
+    const acquireMicrophone = async (suppression: boolean) => {
+        if (micBusyRef.current || forcedRef.current || blockedRef.current) return false;
+        micBusyRef.current = true; setMicBusy(true); setVoiceError('');
+        let stream: MediaStream | null = null;
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: false,
-                audio: {
-                    echoCancellation: true,
-                    noiseSuppression: newState,
-                    autoGainControl: true
-                }
-            });
-
-            // Replace tracks in existing calls
-            const audioTrack = stream.getAudioTracks()[0];
-            audioTrack.enabled = !isMuted && !forcedRef.current;
-            if (myStreamRef.current) {
-                myStreamRef.current.getAudioTracks().forEach(t => t.stop());
-                myStreamRef.current.addTrack(audioTrack);
-
-                // Update PeerJS calls
-                peersMapRef.current.forEach((call) => {
-                    const sender = call.peerConnection.getSenders().find((s: any) => s.track?.kind === 'audio');
-                    if (sender) sender.replaceTrack(audioTrack);
-                });
+            stream = await navigator.mediaDevices.getUserMedia({video: false, audio: {
+                echoCancellation: true, noiseSuppression: suppression, autoGainControl: true
+            }});
+            if (!aliveRef.current || forcedRef.current || blockedRef.current) {
+                stream.getTracks().forEach(track => track.stop()); return false;
             }
-            setMyStream(stream);
-            myStreamRef.current = stream;
-        } catch (err) {
-            console.error("Failed to toggle noise suppression:", err);
+            const track = stream.getAudioTracks()[0];
+            await Promise.all(Array.from(peersMapRef.current.values()).map(call => {
+                const sender = call.peerConnection?.getSenders().find((sender: RTCRtpSender) => sender.track?.kind === 'audio');
+                return sender?.replaceTrack(track);
+            }));
+            if (!aliveRef.current || forcedRef.current || blockedRef.current) {
+                stream.getTracks().forEach(track => track.stop()); return false;
+            }
+            const previous = myStreamRef.current;
+            myStreamRef.current = stream; setMyStream(stream); setIsMuted(false);
+            if (previous && previous !== silentRef.current) previous.getTracks().forEach(track => track.stop());
+            return true;
+        } catch {
+            stream?.getTracks().forEach(track => track.stop());
+            if (aliveRef.current) { releaseMicrophone(); setVoiceError('เปิดไมค์ไม่ได้ กรุณาตรวจสอบสิทธิ์ไมโครโฟนแล้วลองอีกครั้ง คุณยังฟังเพลงและเสียงเพื่อนได้'); }
+            return false;
+        } finally {
+            micBusyRef.current = false;
+            if (aliveRef.current) setMicBusy(false);
         }
+    };
+
+    const toggleNoiseSuppression = async () => {
+        const next = !noiseSuppression;
+        // Changing this setting while muted must never request microphone access.
+        if (isMuted || await acquireMicrophone(next)) setNoiseSuppression(next);
     };
 
     useEffect(() => {
         let mounted = true;
+        aliveRef.current = true;
 
         const socket = io(socketUrl, { transports: ['websocket', 'polling'], reconnection: true });
         socketRef.current = socket;
@@ -122,11 +148,13 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
         });
         const applyMuted=(value:boolean)=>{
             forcedRef.current=value;setForcedMuted(value);
-            if(value){myStreamRef.current?.getAudioTracks().forEach(track=>track.enabled=false);setIsMuted(true);}
+            if(value)releaseMicrophone();
         };
         const deny=({error}:{error:string})=>{
             blockedRef.current=true;setBlocked(error);setJoined(false);
             myStreamRef.current?.getTracks().forEach(track=>track.stop());
+            silentRef.current?.getTracks().forEach(track=>track.stop());
+            void silentContextRef.current?.close().catch(() => {});
             peersMapRef.current.forEach(call=>call.close());peersMapRef.current.clear();
             peerRef.current?.destroy();screenPeerRef.current?.destroy();screenStreamRef.current?.getTracks().forEach(track=>track.stop());setPeers([]);socket.disconnect();
         };
@@ -144,16 +172,13 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
         const init = async () => {
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: false,
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                if (!mounted || blockedRef.current) { stream.getTracks().forEach(track => track.stop()); return; }
-                if(forcedRef.current)stream.getAudioTracks().forEach(track=>track.enabled=false);
+                // A silent Web Audio track reserves an audio sender for replaceTrack.
+                // Unlike getUserMedia, this never opens iOS microphone/voice processing.
+                const context = new AudioContext();
+                silentContextRef.current = context;
+                const stream = context.createMediaStreamDestination().stream;
+                silentRef.current = stream;
+                if (!mounted || blockedRef.current) { stream.getTracks().forEach(track => track.stop()); await context.close(); return; }
                 setMyStream(stream);
                 myStreamRef.current = stream;
 
@@ -209,6 +234,7 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
                     setTimeout(() => {
                         if (peerRef.current && mounted && !blockedRef.current && membersRef.current[otherId]) {
                             console.log("📡 [Outgoing Call] Calling:", otherId);
+                            if (peersMapRef.current.has(otherId)) return;
                             const call = peerRef.current.call(otherId, myStreamRef.current || stream);
 
                             if (call) {
@@ -244,7 +270,7 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
                 socket.on('screen-shared', ({ userId: screenId }) => {
                     console.log("🖥️ [Socket] Screen Shared by:", screenId);
                     if (peerRef.current) {
-                        const call = peerRef.current.call(screenId, stream);
+                        const call = peerRef.current.call(screenId, myStreamRef.current || stream);
                         call.on('stream', (remoteStream) => {
                             setRemoteScreenStream(remoteStream);
                         });
@@ -257,7 +283,7 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
             } catch (err) {
                 console.error("Initialization failed:", err);
-                if (mounted) setVoiceError('ไมโครโฟนยังไม่พร้อม คุณยังฟังเพลงด้วยกันได้ หากต้องการพูดคุย กรุณาอนุญาตไมค์แล้วโหลดหน้าใหม่');
+                if (mounted) setVoiceError('เชื่อมต่อเสียงพูดไม่สำเร็จ คุณยังฟังเพลงด้วยกันได้ ลองโหลดหน้าใหม่เพื่อเชื่อมต่อเสียงพูดอีกครั้ง');
             }
         };
 
@@ -265,11 +291,14 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
         return () => {
             mounted = false;
+            aliveRef.current = false;
             if (socketRef.current) socketRef.current.disconnect();
             if (peerRef.current) peerRef.current.destroy();
             screenPeerRef.current?.destroy();
             screenStreamRef.current?.getTracks().forEach(track=>track.stop());
             if (myStreamRef.current) myStreamRef.current.getTracks().forEach(t => t.stop());
+            silentRef.current?.getTracks().forEach(track => track.stop());
+            void silentContextRef.current?.close().catch(() => {});
         };
     }, []);
 
@@ -292,14 +321,9 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     };
 
     const toggleMute = () => {
-        if(forcedRef.current)return;
-        if (myStreamRef.current) {
-            const audioTrack = myStreamRef.current.getAudioTracks()[0];
-            if (audioTrack) {
-                audioTrack.enabled = !audioTrack.enabled;
-                setIsMuted(!audioTrack.enabled);
-            }
-        }
+        if (forcedRef.current || micBusyRef.current) return;
+        if (isMuted) void acquireMicrophone(noiseSuppression);
+        else releaseMicrophone();
     };
 
     const stopScreenShare=()=>{
@@ -361,9 +385,9 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
         {voiceError && <p role="status" className="notice">{voiceError}</p>}
         {roomId && joined && socketRef.current ? <YoutubeBot socket={socketRef.current} roomId={roomId} sidebarRequest={sidebarRequest} /> : <div className="waiting-panel">กำลังเชื่อมต่อห้องฟังเพลง…</div>}
         {((isScreenSharing && screenStream) || remoteScreenStream) && <section className="screen-panel"><span className="eyebrow">{isScreenSharing ? 'YOUR SCREEN' : 'LIVE SCREEN'}</span><video autoPlay playsInline muted={isScreenSharing} ref={video=>{if(video) video.srcObject=isScreenSharing?screenStream:remoteScreenStream;}} /></section>}
-        <section className="people-panel" id="room-people"><div className="people-heading"><div><span className="eyebrow">THE GOOD COMPANY</span><h2>เพื่อนในห้อง <span className="count">{Object.keys(members).length || 1}</span></h2></div><div className="voice-controls"><button className="btn ghost" disabled={!myStream} onClick={toggleNoiseSuppression}>ลดเสียงรบกวน: {noiseSuppression?'เปิด':'ปิด'}</button><button className="btn ghost" disabled={!userId} onClick={toggleScreenShare}>{isScreenSharing?'หยุดแชร์จอ':'แชร์หน้าจอ'}</button></div></div>
-        <div className="people-list"><div className={`person-card own ${profile.status?.trim() ? '' : 'no-status'}`}><button className="own-profile" aria-label="แก้ไขโปรไฟล์และ status" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} speaking={activeSpeakers.has(ownId) && !isMuted} motion={profile.motion} /><strong>{profile.name}</strong>{settings?.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{profile.status || ''}</span></button><div className="own-card-actions"><button className={`mic-button ${isMuted ? 'muted-mic' : ''}`} disabled={!myStream || forcedMuted} onClick={toggleMute} aria-pressed={isMuted} aria-label={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'} title={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}><i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`} aria-hidden="true" />{forcedMuted ? 'เจ้าของปิดไมค์' : !myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}</button><button className="text-link" onClick={()=>setEditing(true)}>แก้ไขโปรไฟล์</button></div></div>
-        {Object.entries(members).filter(([id])=>id!==ownId && id!==socketRef.current?.id).map(([id,member])=>{const peer=peers.find(p=>p.userId===id);return <div className={`person-card ${member.status?.trim() ? '' : 'no-status'}`} key={id}><Avatar avatar={member.avatar} speaking={activeSpeakers.has(id)} motion={member.motion} /><strong>{member.name}</strong>{member.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{member.status || ''}</span><label className="peer-volume">เสียงที่คุณได้ยิน <span>{Math.round((volumes[id]??1)*100)}%</span><input aria-label={`ระดับเสียง ${member.name}`} type="range" min="0" max="1" step="0.05" value={volumes[id]??1} disabled={!peer} onChange={e=>setVolumes(previous=>({...previous,[id]:Number(e.target.value)}))}/></label>{member.forcedMuted&&<small className="moderated-label">เจ้าของปิดไมค์</small>}{settings?.isOwner&&!member.isOwner&&<div className="member-tools"><button className="btn secondary" onClick={()=>manage('mute',{userId:id,enabled:!member.forcedMuted})}>{member.forcedMuted?'อนุญาตเปิดไมค์':'ปิดไมค์'}</button><button className="btn ghost" onClick={()=>{if(window.confirm(`นำ ${member.name} ออกจากห้อง?`))manage('kick',{userId:id});}}>นำออก</button></div>}{peer && <><audio autoPlay playsInline muted={member.forcedMuted} ref={audio=>{if(audio){if(audio.srcObject!==peer.stream)audio.srcObject=peer.stream;audio.volume=volumes[id]??1;audio.muted=Boolean(member.forcedMuted);}}} /><div className="visualizer-hidden"><AudioVisualizer stream={peer.stream} isMuted={Boolean(member.forcedMuted)} onSpeaking={speaking=>handleSpeaking(id,speaking)} /></div></>}</div>;})}</div>
+        <section className="people-panel" id="room-people"><div className="people-heading"><div><span className="eyebrow">THE GOOD COMPANY</span><h2>เพื่อนในห้อง <span className="count">{Object.keys(members).length || 1}</span></h2></div><div className="voice-controls"><button className="btn ghost" disabled={!myStream || micBusy} onClick={toggleNoiseSuppression}>ลดเสียงรบกวน: {noiseSuppression?'เปิด':'ปิด'}</button><button className="btn ghost" disabled={!userId} onClick={toggleScreenShare}>{isScreenSharing?'หยุดแชร์จอ':'แชร์หน้าจอ'}</button></div></div>
+        <div className="people-list"><div className={`person-card own ${profile.status?.trim() ? '' : 'no-status'}`}><button className="own-profile" aria-label="แก้ไขโปรไฟล์และ status" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} speaking={activeSpeakers.has(ownId) && !isMuted} motion={profile.motion} /><strong>{profile.name}</strong>{settings?.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{profile.status || ''}</span></button><div className="own-card-actions"><button className={`mic-button ${isMuted ? 'muted-mic' : ''}`} disabled={!myStream || forcedMuted || micBusy} onClick={toggleMute} aria-pressed={isMuted} aria-label={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'} title={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}><i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`} aria-hidden="true" />{forcedMuted ? 'เจ้าของปิดไมค์' : !myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}</button><button className={`mic-button ${isDeafened ? 'muted-mic' : ''}`} onClick={()=>setIsDeafened(previous=>!previous)} aria-pressed={isDeafened} aria-label={isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'} title={isDeafened ? 'เปิดเสียงไมค์เพื่อนทุกคน' : 'ปิดเสียงไมค์เพื่อนทุกคน (ยังฟังเพลงได้)'}><i className={`fas ${isDeafened ? 'fa-volume-xmark' : 'fa-headphones'}`} aria-hidden="true" />{isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'}</button><button className="text-link" onClick={()=>setEditing(true)}>แก้ไขโปรไฟล์</button></div></div>
+        {Object.entries(members).filter(([id])=>id!==ownId && id!==socketRef.current?.id).map(([id,member])=>{const peer=peers.find(p=>p.userId===id);return <div className={`person-card ${member.status?.trim() ? '' : 'no-status'}`} key={id}><Avatar avatar={member.avatar} speaking={activeSpeakers.has(id)} motion={member.motion} /><strong>{member.name}</strong>{member.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{member.status || ''}</span><label className="peer-volume">เสียงที่คุณได้ยิน <span>{Math.round((volumes[id]??1)*100)}%</span><input aria-label={`ระดับเสียง ${member.name}`} type="range" min="0" max="1" step="0.05" value={volumes[id]??1} disabled={!peer} onChange={e=>setVolumes(previous=>({...previous,[id]:Number(e.target.value)}))}/></label>{member.forcedMuted&&<small className="moderated-label">เจ้าของปิดไมค์</small>}{settings?.isOwner&&!member.isOwner&&<div className="member-tools"><button className="btn secondary" onClick={()=>manage('mute',{userId:id,enabled:!member.forcedMuted})}>{member.forcedMuted?'อนุญาตเปิดไมค์':'ปิดไมค์'}</button><button className="btn ghost" onClick={()=>{if(window.confirm(`นำ ${member.name} ออกจากห้อง?`))manage('kick',{userId:id});}}>นำออก</button></div>}{peer && <><audio autoPlay playsInline muted={isDeafened || Boolean(member.forcedMuted)} ref={audio=>{if(audio){if(audio.srcObject!==peer.stream)audio.srcObject=peer.stream;audio.volume=volumes[id]??1;audio.muted=isDeafened || Boolean(member.forcedMuted);}}} /><div className="visualizer-hidden"><AudioVisualizer stream={peer.stream} isMuted={Boolean(member.forcedMuted)} onSpeaking={speaking=>handleSpeaking(id,speaking)} /></div></>}</div>;})}</div>
         {myStream && <div className="visualizer-hidden"><AudioVisualizer stream={myStream} isMuted={isMuted} onSpeaking={speaking=>handleSpeaking(ownId,speaking)} /></div>}
         </section><footer className="room-footer">mellow / A LITTLE CLOSER, ONE SONG AT A TIME <span>ฟังด้วยกัน ใกล้กันอีกนิด</span></footer></main>
         <nav className="mobile-room-nav" aria-label="ทางลัดในห้อง"><button onClick={()=>document.getElementById('room-player')?.scrollIntoView({behavior:'smooth',block:'start'})}>♫ เพลง</button><button onClick={()=>{setSidebarRequest({tab:'queue',id:Date.now()});document.getElementById('room-sidebar')?.scrollIntoView({behavior:'smooth',block:'start'});}}>≋ คิว</button><button onClick={()=>{setSidebarRequest({tab:'chat',id:Date.now()});document.getElementById('room-sidebar')?.scrollIntoView({behavior:'smooth',block:'start'});}}>☏ แชต</button><button onClick={()=>document.getElementById('room-people')?.scrollIntoView({behavior:'smooth',block:'start'})}>◉ เพื่อน</button></nav>

@@ -14,6 +14,11 @@ export default function ProfileForm({ initial = readProfile(), onSave, label = '
     initial?: Profile; onSave: (profile: Profile) => void; label?: string; onCancel?: () => void;
 }) {
     const [profile, setProfile] = useState(initial);
+    const [randomName] = useState(() => {
+        const animals = ['แมว', 'จิ้งจอก', 'หมี', 'กระต่าย', 'แพนด้า', 'นาก', 'เพนกวิน', 'กบ'];
+        const moods = ['สายชิล', 'ฟังเพลง', 'อารมณ์ดี', 'ขี้เซา', 'นักเต้น', 'ยิ้มเก่ง'];
+        return `${animals[Math.floor(Math.random() * animals.length)]}${moods[Math.floor(Math.random() * moods.length)]}${Math.floor(Math.random() * 900) + 100}`;
+    });
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
     const input = useRef<HTMLInputElement>(null);
@@ -38,14 +43,15 @@ export default function ProfileForm({ initial = readProfile(), onSave, label = '
         finally { setLoading(false); if (input.current) input.current.value = ''; }
     };
     return <form className="profile-form" onSubmit={e => {
-        e.preventDefault(); if (!profile.name.trim() || loading) return;
-        const clean = { ...profile, name: profile.name.trim().slice(0, 40), status: (profile.status || '').trim().slice(0, 80) };
+        e.preventDefault(); if (loading) return;
+        const clean = { ...profile, name: profile.name.trim().slice(0, 40) || randomName, status: (profile.status || '').trim().slice(0, 80) };
         try { localStorage.setItem('mellow-profile', JSON.stringify(clean)); } catch {}
         onSave(clean);
     }}>
         <div className="profile-preview"><Avatar avatar={profile.avatar} /><div><strong>เลือกตัวแทนของคุณ</strong><p>เป็นตัวเอง หรือเป็นตัวละครที่ชอบ</p></div></div>
         <label htmlFor="display-name">ชื่อที่เพื่อนจะเห็น</label>
-        <input id="display-name" autoFocus autoComplete="nickname" required maxLength={40} value={profile.name} placeholder="อยากให้เพื่อนเรียกว่าอะไร?" onChange={e => setProfile({ ...profile, name: e.target.value })} />
+        <input id="display-name" autoFocus autoComplete="nickname" maxLength={40} value={profile.name} placeholder="เว้นว่างเพื่อสุ่มชื่อให้" aria-describedby="random-name-hint" onChange={e => setProfile({ ...profile, name: e.target.value })} />
+        <p id="random-name-hint" className="micro">{profile.name.trim() ? 'ใช้ชื่อที่คุณกรอก หรือเว้นว่างให้เราสุ่มชื่อให้' : `เข้าห้องในชื่อ ${randomName}`}</p>
         <label htmlFor="profile-status">Status <span className="muted">· ไม่ใส่ก็ได้</span></label>
         <input id="profile-status" maxLength={80} value={profile.status || ''} placeholder="วันนี้อยากบอกอะไรเพื่อน?" onChange={e => setProfile({ ...profile, status: e.target.value })} />
         <div className="character-grid" role="group" aria-label="เลือกตัวละคร">
@@ -57,6 +63,6 @@ export default function ProfileForm({ initial = readProfile(), onSave, label = '
         <label className="check-row"><input type="checkbox" checked={profile.motion} onChange={e => setProfile({ ...profile, motion: e.target.checked })} /> ขยับตัวละครเมื่อพูด <span className="muted">(PNGtuber)</span></label>
         <p className="micro">รูปที่เลือกจะแสดงให้เพื่อนในห้องเห็น</p>
         {error && <p role="alert" className="notice">{error}</p>}
-        <div className="profile-actions">{onCancel && <button className="btn secondary" type="button" onClick={onCancel}>ยกเลิก</button>}<button className="btn primary grow" disabled={loading || !profile.name.trim()}>{label} ↗</button></div>
+        <div className="profile-actions">{onCancel && <button className="btn secondary" type="button" onClick={onCancel}>ยกเลิก</button>}<button className="btn primary grow" disabled={loading}>{label} ↗</button></div>
     </form>;
 }
