@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactPlayer from 'react-player';
 import RoomChat from './RoomChat';
+import PlaylistTools from './PlaylistTools';
 import { Socket } from 'socket.io-client';
 interface Track { id: string; videoId: string; title: string; author?: string }
 interface Activity { id: string; timestamp: number; actor: string; action: string; message: string; title: string; position?: number }
@@ -124,6 +125,10 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
         </div>
         <div id="music-queue-panel" role="tabpanel" aria-labelledby="music-queue-tab" hidden={activeTab!=='queue'} className="queue-content">
         <form className="add-song" onSubmit={e => {e.preventDefault(); const value=input.trim();if(value) command('add',{url:value},()=>setInput(''));}}><label htmlFor="song-url">เพิ่มเพลงเข้าห้อง</label><div><input id="song-url" type="text" value={input} onChange={e=>setInput(e.target.value)} placeholder="วางลิงก์ YouTube ที่นี่…" /><button className="btn primary" disabled={!input.trim()} aria-label="เพิ่มเพลง">＋</button></div></form>
+        <PlaylistTools tracks={state?.queue||[]} onImport={(playlist,mode,done)=>{
+            if(!socket?.connected){done('กำลังเชื่อมต่อห้อง กรุณาลองใหม่');return;}
+            socket.timeout(8000).emit('music-command',{roomId,action:'import',playlist,mode},(timeout:Error|null,result:{error?:string})=>done(timeout?'ไม่ได้รับคำตอบ ตรวจคิวก่อนลองใหม่':result?.error));
+        }}/>
         <div className="queue-modes"><button className="mode-button" aria-pressed={Boolean(state?.shuffle)} onClick={()=>command('shuffle',{enabled:!state?.shuffle})}><span>⤨ สุ่มคิว</span><b>{state?.shuffle?'เปิด':'ปิด'}</b></button><button className="mode-button" aria-pressed={Boolean(state?.repeat)} onClick={()=>command('repeat',{enabled:!state?.repeat})}><span>↻ วนทั้งคิว</span><b>{state?.repeat?'เปิด':'ปิด'}</b></button></div><p className="micro">{state?.shuffle?'สุ่มไม่ซ้ำจนฟังครบทุกเพลงในรอบ':'เล่นตามลำดับในคิว'} · {state?.repeat?'ฟังครบแล้วเริ่มรอบใหม่':'ฟังครบแล้วหยุด'}</p>
         <ol className="song-list">{state?.queue.map((item,index)=><li key={item.id} className={item.id===current?.id?'current':''}>
             <button className="song-select" onClick={()=>command('select',{id:item.id})}><span className="song-number">{item.id===current?.id?'♫':String(index+1).padStart(2,'0')}</span><img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" /><span><strong>{item.title}</strong><small>{item.id===current?.id?'กำลังเลือกฟัง':item.author || 'YouTube · พร้อมเล่น'}</small></span></button>

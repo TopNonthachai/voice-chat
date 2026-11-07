@@ -24,7 +24,8 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
         return { ...state, position: state.position + (state.playing ? Math.max(0, now - state.updatedAt) / 1000 : 0), updatedAt: now };
     }
     io.on('connection', socket => {
-        socket.on('music-sync', ({ roomId } = {}, ack) => {
+        socket.on('music-sync', (payload = {}, ack) => {
+            const {roomId}=payload||{};
             if (!socket.rooms.has(roomId)) return;
             if (!rooms.has(roomId)) rooms.set(roomId, empty());
             const current=snapshot(rooms.get(roomId));
@@ -33,6 +34,7 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
         });
         socket.on('music-command', (data = {}, ack = () => {}) => {
             if (typeof ack !== 'function') ack = () => {};
+            if(!data||typeof data!=='object'||Array.isArray(data))return ack({error:'คำสั่งไม่ถูกต้อง'});
             const { roomId, action } = data;
             if (!socket.rooms.has(roomId)) return ack({ error: 'Join the room first.' });
             const state = rooms.get(roomId) || empty();
@@ -72,6 +74,26 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                 else { next.playing = false; next.finished = true; if (action === 'ended') next.position = data.duration; }
             };
             switch (action) {
+                case 'import': {
+                    const list=data.playlist;
+                    if(!list||list.format!=='mellow-playlist'||list.version!==1||!Array.isArray(list.tracks)||!list.tracks.length||list.tracks.length>100||!['append','replace'].includes(data.mode))return ack({error:'ไฟล์เพลย์ลิสต์ไม่ถูกต้อง (รองรับ 1–100 เพลง)'});
+                    const parsed=[];const seen=new Set(data.mode==='append'?next.queue.map(item=>item.videoId):[]);
+                    for(const entry of list.tracks){
+                        if(!entry||typeof entry.videoId!=='string'||!/^[-\w]{11}$/.test(entry.videoId))return ack({error:'พบรหัสวิดีโอไม่ถูกต้อง ไม่ได้นำเข้ารายการ'});
+                        if(seen.has(entry.videoId))continue;seen.add(entry.videoId);
+                        parsed.push({id:randomUUID(),videoId:entry.videoId,title:typeof entry.title==='string'&&entry.title.trim()?entry.title.trim().slice(0,300):`YouTube · ${entry.videoId}`,author:typeof entry.author==='string'?entry.author.slice(0,100):''});
+                    }
+                    if((data.mode==='append'?next.queue.length:0)+parsed.length>100)return ack({error:'คิวจะเกิน 100 เพลง กรุณาลดจำนวนเพลงก่อน'});
+                    if(!parsed.length)return ack({error:'เพลงทั้งหมดอยู่ในคิวแล้ว'});
+                    if(data.mode==='replace'){
+                        next.queue=parsed;next.remaining=shuffled(parsed.map(item=>item.id));select(parsed[0].id);next.playing=false;
+                    }else{
+                        next.queue.push(...parsed);if(next.shuffle)next.remaining.push(...shuffled(parsed.map(item=>item.id)));
+                        if(!next.currentId){select(parsed[0].id);next.playing=false;}
+                    }
+                    data.importedCount=parsed.length;
+                    break;
+                }
                 case 'add': {
                     const id = videoId(data.url);
                     if (!id) return ack({ error: 'Please paste a valid YouTube video link (not a playlist-only link).' });
@@ -140,6 +162,7 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
             }
             const affected = (action === 'add' ? next.queue.at(-1) : state.queue.find(item => item.id === (data.id || state.currentId)));
             const labels = {
+                import: `นำเข้าเพลย์ลิสต์ ${data.importedCount||0} เพลง (${data.mode==='replace'?'แทนที่คิว':'เพิ่มต่อท้าย'})`,
                 add: 'เพิ่มเพลงเข้าคิว', remove: 'ลบเพลงออกจากคิว', select: 'เลือกเล่นเพลง',
                 play: 'เล่นเพลงให้ทุกคน', pause: 'หยุดเพลงให้ทุกคน', seek: 'เลื่อนเวลาเพลง',
                 next: 'ข้ามไปเพลงถัดไป', ended: next.playing ? 'เล่นเพลงถัดไปอัตโนมัติ' : 'เล่นครบคิวแล้ว',

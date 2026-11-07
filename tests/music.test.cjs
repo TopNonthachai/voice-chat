@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { io: client } = require('socket.io-client');
 require('../youtube-metadata.cjs').createTitleResolver=()=>async()=>null;
-const { server, io } = require('../server.js');
+const { server, io, roomService } = require('../server.js');
 const { videoId } = require('../music-server.cjs');
 const { once } = require('node:events');
 test('validates YouTube URLs', () => {
@@ -14,10 +14,12 @@ test('two clients sync, late join, pause, zero seek, queue, duplicate ended, iso
     t.after(async () => { clients.forEach(s => s.disconnect()); await new Promise(resolve => io.close(resolve)); });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     const origin = `http://127.0.0.1:${server.address().port}`;
-    const join = async (s, room) => { const p = once(s, 'existing-users'); s.emit('join-room', room, s.id, 'Test'); await p; };
-    const connect = async room => { const s = client(origin, { autoConnect:false, reconnection:false }); clients.push(s); const p=once(s,'connect');s.connect();await p;await join(s,room);return s; };
-    const sync = async (s,room='music') => { const p=once(s,'music-state');s.emit('music-sync',{roomId:room});return (await p)[0]; };
-    const cmd = (s,action,extra={},room='music') => new Promise((resolve,reject) => s.timeout(2000).emit('music-command',{roomId:room,action,...extra},(err,res)=>err?reject(err):resolve(res)));
+    const roomMap=new Map(),credentials=new Map();
+    const getRoom=label=>{if(!roomMap.has(label))roomMap.set(label,roomService.createRoom());return roomMap.get(label);};
+    const join=async(s,label)=>{const room=getRoom(label);const result=await new Promise((resolve,reject)=>s.timeout(2000).emit('join-room',room.roomId,s.id,'Test',{}, {invite:room.invite,memberToken:credentials.get(s)},(err,result)=>err?reject(err):resolve(result)));assert.ok(result.ok);credentials.set(s,result.memberToken);};
+    const connect=async room=>{const s=client(origin,{autoConnect:false,reconnection:false});clients.push(s);const p=once(s,'connect');s.connect();await p;await join(s,room);return s;};
+    const sync=async(s,room='music')=>{const p=once(s,'music-state');s.emit('music-sync',{roomId:getRoom(room).roomId});return(await p)[0];};
+    const cmd=(s,action,extra={},room='music')=>new Promise((resolve,reject)=>s.timeout(2000).emit('music-command',{roomId:getRoom(room).roomId,action,...extra},(err,res)=>err?reject(err):resolve(res)));
     const a=await connect('music'),b=await connect('music'),other=await connect('other');
     let profileEvent=once(b,'room-members');
     a.emit('profile-update',{name:'Named guest',avatar:'🐸',motion:false,status:'ฟังเพลงชิล ๆ'});

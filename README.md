@@ -54,7 +54,7 @@ Changing local files does not update Render. Deploy the updated repository revis
 - Individual YouTube links and raw video IDs are supported; importing a full YouTube playlist is not implemented.
 - Videos that disallow embedding, regional restrictions, ads and browser autoplay restrictions may affect playback.
 - Queue entries fetch the real video title and channel through YouTube oEmbed, with the video ID as a fallback. No API key is required.
-- Anyone with the room link can control playback. There are no host-only permissions yet.
+- Everyone in a room can control music. Room creation issues a separate owner credential; only the owner can moderate members and change admission settings.
 
 ## Checks
 
@@ -99,3 +99,17 @@ Attachments expire 24 hours after upload. A server timer removes expired buffers
 Real video titles and channel names are fetched server-side from YouTube oEmbed without an API key. Fetches have a 5-second timeout, coalesce concurrent requests, and cache successful results for 24 hours. Metadata updates are broadcast without changing playback time or adding an activity-log event. If unavailable, the video ID remains usable.
 
 The player shows connection/sync status and a manual resync button. Resync fetches a read-only room snapshot and seeks only the requesting local player. Disconnected rooms keep the sidebar mounted while reconnecting; reconnect accepts a fresh server snapshot even after a server restart resets revisions. Playlists still live in server memory: this update does not add a database or permanent playlist storage.
+
+## Owner controls, invitations and playlist files
+
+Create rooms from the home page. The server generates an 8-character room ID and a separate random 12-character invite token; copied links use `/#/r/<invite>`. Room IDs alone cannot enter private rooms. The creator receives an owner credential stored in that browser. Credentials are never included in invite links or participant lists. Keep that browser's site storage to retain ownership while the server is running.
+
+New rooms require invitation links by default. The owner can switch to room-code access, lock admission of new members, and rotate invitations (old invite links stop working). Existing members with valid credentials can reconnect while locked. Ownership is retained when the owner disconnects; it is not handed to the next visitor. Room state and credentials remain in memory and reset on server restart, so rooms/links must be created again after a deploy. Unknown/expired rooms do not silently create a new room.
+
+Owners can force-mute a member or remove them. A forced-muted client disables microphone tracks and cannot turn the microphone back on until allowed. Recipients also silence that member's audio. Allowing the mic does not automatically enable it; the member chooses when to unmute. Removing a member revokes their room credential, removes Socket.IO membership and closes voice connections in the normal client. It blocks that saved browser identity, not an account/IP ban; a person with a fresh browser identity and a valid invite could join again while admission is open. Lock or rotate the invitation when needed. Voice is PeerJS P2P, so this is cooperative-client moderation rather than a server-side audio relay.
+
+Each friend's card has a 0–100% volume slider affecting only audio on your device; 0% locally silences that friend. Owner mute is shown separately. Cross-network, real-device microphone playback still needs user testing.
+
+Queue controls include JSON export and import. Exports contain only video IDs/titles/channel names, not chat, profiles or room credentials. Imports accept the mellow-playlist v1 format, up to 100 tracks / 128 KB, and support append or replace. Validation is atomic; duplicate video IDs are skipped. Append keeps the current playback; replace loads the new queue paused. A downloaded JSON playlist survives a server restart because it is saved on your own device.
+
+Integration tests cover owner authorization, invite-only admission, room locks, revoked credentials, owner reconnect, force-mute state, invite rotation, import validation, duplicate filtering and playlist JSON round-trips. Browser QA covers owner room creation, locked-owner refresh, and actual import/export file controls.

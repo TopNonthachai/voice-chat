@@ -9,6 +9,7 @@ const App: React.FC = () => {
     <Router>
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/r/:invite" element={<RoomEntry />} />
         <Route path="/room/:roomId" element={<RoomEntry />} />
         <Route path="/server-setup" element={<ServerGuide />} />
       </Routes>

@@ -36,7 +36,7 @@ function registerChat(io, app, getProfile, {now=Date.now,fileTtlMs=24*60*60*1000
     const existing = (room,socket,clientId) => room.messages.find(m=>m.clientId===clientId && m.senderId===socket.data.userId);
     const validId = id => typeof id==='string' && /^[a-zA-Z0-9-]{8,80}$/.test(id);
     io.on('connection',socket=>{
-        socket.on('chat-sync',({roomId}={})=>{if(member(roomId,socket.id)){sweepExpired();socket.emit('chat-history',roomState(roomId).messages);}});
+        socket.on('chat-sync',(payload={})=>{const {roomId}=payload||{};if(member(roomId,socket.id)){sweepExpired();socket.emit('chat-history',roomState(roomId).messages);}});
         socket.on('chat-send',(data={},ack=()=>{})=>{
             if(typeof ack!=='function') ack=()=>{};
             const {roomId,clientId,text}=data || {};
@@ -55,6 +55,7 @@ function registerChat(io, app, getProfile, {now=Date.now,fileTtlMs=24*60*60*1000
     };
     app.post('/api/chat/files',authorize,express.raw({type:'application/octet-stream',limit:MAX_FILE}),(req,res)=>{
         const socket=req.chatSocket,roomId=req.query.roomId,clientId=req.query.uploadId;
+        if(!member(roomId,socket.id))return res.status(403).json({error:'คุณไม่ได้อยู่ในห้องนี้แล้ว'});
         if(!validId(clientId))return res.status(400).json({error:'รหัสการอัปโหลดไม่ถูกต้อง'});
         const room=roomState(roomId),old=existing(room,socket,clientId);
         if(old)return res.json({ok:true,message:old});
