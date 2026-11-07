@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import ReactPlayer from 'react-player';
+import YouTubeEmbed from './YouTubeEmbed';
+import {YouTubeHandle} from './youtube-api';
 import RoomChat from './RoomChat';
 import PlaylistTools from './PlaylistTools';
 import { Socket } from 'socket.io-client';
@@ -10,7 +11,7 @@ interface MusicState {
     updatedAt: number; revision: number; generation: number; shuffle: boolean; repeat: boolean; finished: boolean; activity: Activity[];
 }
 const time = (s: number) => `${Math.floor(Math.max(0, s || 0) / 60)}:${String(Math.floor(Math.max(0, s || 0) % 60)).padStart(2, '0')}`;
-export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; roomId: string }) {
+export default function YoutubeBot({ socket, roomId, sidebarRequest }: { socket: Socket | null; roomId: string; sidebarRequest?: {tab:'queue'|'chat';id:number} }) {
     const [state, setState] = useState<MusicState | null>(null);
     const [input, setInput] = useState('');
     const [activeTab, setActiveTab] = useState<'queue' | 'chat' | 'log'>('queue');
@@ -23,17 +24,22 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
     const [unread, setUnread] = useState(0);
     const [error, setError] = useState('');
     const [enabled, setEnabled] = useState(false);
+    const [nativeControls,setNativeControls]=useState(()=>/iPad|iPhone|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1));
+    const [localPlaying,setLocalPlaying]=useState(false);
+    const [audioHint,setAudioHint]=useState('');
+    const gestureTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
     const [ready, setReady] = useState(false);
     const [position, setPosition] = useState(0);
     const [duration, setDuration] = useState(0);
     const [volume, setVolume] = useState(0.7);
     const [seek, setSeek] = useState<number | null>(null);
-    const player = useRef<HTMLVideoElement>(null);
+    const player = useRef<YouTubeHandle>(null);
     const latest = useRef<MusicState | null>(null);
     const receivedAt = useRef(0);
     const readyRef = useRef(false);
     const enabledRef = useRef(false);
     const current = state?.queue.find(item => item.id === state.currentId);
+    useEffect(()=>{if(sidebarRequest)setActiveTab(sidebarRequest.tab);},[sidebarRequest]);
     const targetPosition = () => {
         const value = latest.current;
         return value ? value.position + (value.playing ? (performance.now() - receivedAt.current) / 1000 : 0) : 0;
@@ -41,6 +47,7 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
     const align = () => {
         const element = player.current;
         if (!enabledRef.current || !readyRef.current || !element || !latest.current || (element.ended && !forceSync.current)) return;
+        if(element.paused&&!forceSync.current)return;
         const target = Math.min(targetPosition(), Number.isFinite(element.duration) ? Math.max(0, element.duration - 0.1) : Infinity);
         if (forceSync.current || Math.abs(element.currentTime - target) > 1.5) element.currentTime = target;
         forceSync.current = false;
@@ -49,8 +56,10 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
         if (!socket) return;
         const update = (next: MusicState) => {
             if (latest.current && next.revision < latest.current.revision) return;
+            if(!next.currentId||!latest.current?.currentId){readyRef.current=false;setReady(false);}
+            if(next.currentId!==latest.current?.currentId||next.playing!==latest.current?.playing||(!next.playing&&Math.abs(next.position-(latest.current?.position||0))>0.1))forceSync.current=true;
             if (latest.current?.generation !== next.generation) {
-                readyRef.current = false; setReady(false); setDuration(0); setError(''); setSeek(null);
+                setLocalPlaying(false); setDuration(0); setError(''); setSeek(null);
             }
             latest.current = next; receivedAt.current = performance.now();
             setState(next); setPosition(next.position); align();
@@ -65,7 +74,7 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
         const timer = window.setInterval(() => { align(); setPosition(targetPosition()); }, 1000);
         const visible = () => { if (document.visibilityState === 'visible') sync(); };
         document.addEventListener('visibilitychange', visible);
-        return () => {socket.off('music-state', update); socket.off('connect', reconnect);socket.off('disconnect',disconnected);socket.off('connect_error',disconnected);if(syncTimer.current)clearTimeout(syncTimer.current); clearInterval(timer); document.removeEventListener('visibilitychange', visible);};
+        return () => {socket.off('music-state', update); socket.off('connect', reconnect);socket.off('disconnect',disconnected);socket.off('connect_error',disconnected);if(syncTimer.current)clearTimeout(syncTimer.current); clearInterval(timer);if(gestureTimer.current)clearTimeout(gestureTimer.current); document.removeEventListener('visibilitychange', visible);};
     }, [socket, roomId]);
     const resync = () => {
         if(!socket?.connected){setSyncStatus('กำลังเชื่อมต่อใหม่…');socket?.connect();return;}
@@ -84,40 +93,64 @@ export default function YoutubeBot({ socket, roomId }: { socket: Socket | null; 
                 else success?.();
             });
     };
+    const startLocal = (shouldPlay:boolean) => {
+        forceSync.current=true;const started=player.current?.startFromGesture(shouldPlay);
+        if(!started){setNativeControls(true);setAudioHint('แตะปุ่มเล่นบนวิดีโอเพื่อเริ่มเสียง');return;}
+        setAudioHint('');
+        if(gestureTimer.current)clearTimeout(gestureTimer.current);
+        if(shouldPlay)gestureTimer.current=setTimeout(()=>{
+            if(player.current?.paused || player.current?.muted){setNativeControls(true);setAudioHint('Safari ยังไม่เริ่มเสียง ลองแตะ ▶ หรือเปิดเสียงบนวิดีโอด้านบน');}
+        },2500);
+    };
     const toggleListening = () => {
-        enabledRef.current = !enabledRef.current;
-        if (!enabledRef.current) {player.current?.pause(); readyRef.current = false; setReady(false);}
-        setEnabled(enabledRef.current); setError('');
+        if(enabledRef.current){enabledRef.current=false;player.current?.pause();setEnabled(false);setLocalPlaying(false);setAudioHint('');return;}
+        if(!readyRef.current){setAudioHint('กำลังเตรียมตัวเล่น รอปุ่มพร้อมแล้วแตะเข้าฟังอีกครั้ง');return;}
+        enabledRef.current=true;setEnabled(true);setError('');forceSync.current=true;
+        startLocal(Boolean(latest.current?.playing));align();
+    };
+    const sharedPlayback = () => {
+        if(latest.current?.playing){player.current?.pause();setLocalPlaying(false);command('pause');}
+        else {if(enabledRef.current)startLocal(true);command('play');}
     };
     const togglePlayback = () => {
-        if (!enabledRef.current) {toggleListening(); return;}
-        command(latest.current?.playing ? 'pause' : 'play');
+        if(!enabledRef.current){toggleListening();return;}
+        sharedPlayback();
     };
-    const commitSeek = () => {if (seek !== null) {command('seek', {position:seek}); setSeek(null);}};
+    const audible = () => {
+        if(gestureTimer.current)clearTimeout(gestureTimer.current);
+        if(!enabledRef.current&&!nativeControls){player.current?.pause();setLocalPlaying(false);return;}
+        const wasEnabled=enabledRef.current;
+        enabledRef.current=true;setEnabled(true);setLocalPlaying(true);setNativeControls(false);setAudioHint('');
+        if(!wasEnabled)forceSync.current=true;align();
+        if((!wasEnabled||nativeControls)&&!latest.current?.playing)command('play');
+    };
+    const commitSeek = () => {if (seek !== null) {setNativeControls(false);command('seek', {position:seek}); setSeek(null);}};
     return <section className="listening-layout">
-        <div className="player-panel"><div className="panel-top"><div><span className="eyebrow">THE LISTENING ROOM</span><h2>เพลงนี้ มีเราอยู่ด้วยกัน</h2></div><span className="live-pill"><i /> LIVE ROOM</span></div>
+        <div className="player-panel" id="room-player"><div className="panel-top"><div><span className="eyebrow">THE LISTENING ROOM</span><h2>เพลงนี้ มีเราอยู่ด้วยกัน</h2></div><span className="live-pill"><i /> LIVE ROOM</span></div>
         <div className="sync-toolbar"><span role="status"><i className={`status-dot ${connected?'on':''}`}/>{connected?syncStatus:'ขาดการเชื่อมต่อ กำลังเชื่อมต่อใหม่…'}</span><button className="btn secondary" disabled={syncing} onClick={resync}>{syncing?'กำลังซิงก์…':'↻ ซิงก์ใหม่'}</button></div>
         <div className="video-stage">
-            {current ? <>{enabled ? <div className="video-media" inert>
-                <ReactPlayer key={`${current.id}-${state?.generation}`} ref={player} src={`https://www.youtube.com/watch?v=${current.videoId}`}
-                    playing={Boolean(state?.playing)} volume={volume} controls={false} playsInline width="100%" height="100%"
-                    onLoadedMetadata={() => {readyRef.current = true; setReady(true); setDuration(player.current?.duration || 0); align();}}
-                    onDurationChange={() => setDuration(player.current?.duration || 0)}
-                    onEnded={() => {if (enabledRef.current) command('ended', {duration:player.current?.duration});}}
-                    onError={() => setError('คลิปนี้เล่นในห้องไม่ได้ อาจจำกัดการฝังวิดีโอ ลองข้ามหรือเปลี่ยนเพลงครับ')} />
-            </div> : <img className="video-cover" src={`https://i.ytimg.com/vi/${current.videoId}/hqdefault.jpg`} alt="ภาพตัวอย่างเพลงปัจจุบัน" />}
-            <button className={`video-toggle ${!enabled ? 'not-listening' : ''}`} onClick={togglePlayback} aria-label={!enabled ? 'เข้าฟังเพลง' : state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>
+            {current ? <><div className={`video-media ${nativeControls?'native-interaction':''}`} inert={!nativeControls}>
+                <YouTubeEmbed ref={player} videoId={current.videoId} generation={state?.generation||0} playing={Boolean(state?.playing)} enabled={enabled} volume={volume} nativeControls={nativeControls}
+                    onReady={()=>{readyRef.current=true;setReady(true);setDuration(player.current?.duration||0);}}
+                    onDuration={setDuration} onAudible={audible} onPaused={canBroadcast=>{setLocalPlaying(false);if(canBroadcast&&nativeControls&&enabledRef.current&&latest.current?.playing)command('pause');}}
+                    onBlocked={()=>{setLocalPlaying(false);setNativeControls(true);setAudioHint('แตะ ▶ หรือเปิดเสียงบนวิดีโอ เพื่ออนุญาตเสียงเพลงบนเครื่องนี้');}}
+                    onEnded={duration=>{setLocalPlaying(false);if(enabledRef.current)command('ended',{duration});}}
+                    onError={()=>{setLocalPlaying(false);setError('โหลดวิดีโอไม่ได้ ลองซิงก์ใหม่หรือเปลี่ยนเพลงครับ');}}/>
+            </div>
+            {!nativeControls&&<button className={`video-toggle ${!enabled ? 'not-listening' : ''}`} onClick={togglePlayback} aria-label={!enabled ? 'เข้าฟังเพลง' : state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>
                 <span className="video-toggle-icon">{!enabled ? '♫' : state?.playing ? 'Ⅱ' : '▶'}</span><span className="video-toggle-label">{!enabled ? 'เข้าฟังเพลงด้วยกัน' : state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}</span>
-            </button></> : <div className="empty-stage"><span className="empty-disc">♫</span><h3>เพลงแรกของห้อง จะเป็นเพลงอะไรดี?</h3><p>วางลิงก์ YouTube ในคิวด้านข้าง แล้วเริ่มฟังด้วยกัน</p></div>}
+            </button>}</> : <div className="empty-stage"><span className="empty-disc">♫</span><h3>เพลงแรกของห้อง จะเป็นเพลงอะไรดี?</h3><p>วางลิงก์ YouTube ในคิวด้านข้าง แล้วเริ่มฟังด้วยกัน</p></div>}
         </div>
-        <div className="now-playing"><div><span className="eyebrow">{state?.playing ? 'NOW PLAYING' : 'TAKE A BREATHER'}</span><h3>{current ? current.title : 'รอเพลงโปรดของคุณ'}</h3></div><span className="play-status">{!enabled ? 'ยังไม่ได้เข้าฟัง' : !ready && current ? 'กำลังโหลด…' : state?.playing ? 'กำลังฟังด้วยกัน' : 'หยุดพักเพลง'}</span></div>
-        <div className="timeline"><input aria-label="เลื่อนเวลาให้ทุกคน" type="range" min="0" max={duration || 1} step="0.5" disabled={!ready || !duration} value={seek ?? Math.min(position, duration || 0)}
+        <div className="now-playing"><div><span className="eyebrow">{state?.playing ? 'NOW PLAYING' : 'TAKE A BREATHER'}</span><h3>{current ? current.title : 'รอเพลงโปรดของคุณ'}</h3></div><span className="play-status">{!ready&&current?'กำลังเตรียมตัวเล่น…':!enabled?'ยังไม่ได้เข้าฟัง':!state?.playing?'ห้องหยุดเพลง':localPlaying?'ตัวเล่นกำลังเล่นบนเครื่องนี้':'ห้องกำลังเล่น · เครื่องคุณยังไม่เริ่ม'}</span></div>
+        <div className="timeline"><input aria-label="เลื่อนเวลาให้ทุกคน" type="range" min="0" max={duration || 1} step="0.5" disabled={!enabled || !ready || !duration} value={seek ?? Math.min(position, duration || 0)}
             onChange={e => setSeek(Number(e.target.value))} onPointerUp={commitSeek} onKeyUp={commitSeek} onBlur={commitSeek} /><div><span>{time(seek ?? position)}</span><span>{time(duration)}</span></div></div>
-        <div className="transport"><div className="transport-main"><button className="round-btn play" disabled={!current} onClick={() => command(state?.playing ? 'pause' : 'play')} aria-label={state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>{state?.playing ? 'Ⅱ' : '▶'}</button><button className="round-btn" disabled={!current} onClick={() => command('next')} aria-label="เพลงถัดไป">↠</button><div className="transport-caption"><strong>{state?.playing ? 'Pause all' : 'Play all'}</strong><span>ควบคุมพร้อมกันทั้งห้อง</span></div></div><label className="volume">♫<input aria-label="ระดับเสียงของคุณ" type="range" min="0" max="1" step="0.05" value={volume} onChange={e => setVolume(Number(e.target.value))} /></label></div>
-        <div className="listening-bar"><div><span className={`status-dot ${enabled ? 'on' : ''}`} /><span>{enabled ? 'คุณอยู่ในห้องฟังเพลง' : 'เข้าฟังเมื่อคุณพร้อม'}</span></div><button className={`btn ${enabled ? 'secondary' : 'primary'}`} onClick={toggleListening}>{enabled ? 'ออกจากการฟัง' : 'เข้าฟัง YouTube'} {enabled ? '↗' : '♫'}</button></div>
+        <div className="transport"><div className="transport-main"><button className="round-btn play" disabled={!current || !connected} onClick={sharedPlayback} aria-label={state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>{state?.playing ? 'Ⅱ' : '▶'}</button><button className="round-btn" disabled={!current} onClick={() => command('next')} aria-label="เพลงถัดไป">↠</button><div className="transport-caption"><strong>{state?.playing ? 'Pause all' : 'Play all'}</strong><span>ควบคุมพร้อมกันทั้งห้อง</span></div></div><label className="volume">♫<input aria-label="ระดับเสียงของคุณ" type="range" min="0" max="1" step="0.05" value={volume} onChange={e => setVolume(Number(e.target.value))} /></label></div>
+        {current&&<div className="audio-unlock"><button className="btn secondary" disabled={!ready} onClick={()=>{enabledRef.current=true;setEnabled(true);startLocal(Boolean(latest.current?.playing));}}>♪ เปิดเสียงบนเครื่องนี้</button><button className="text-link" onClick={()=>setNativeControls(value=>!value)}>{nativeControls?'ใช้ปุ่มควบคุมของห้อง':'แสดงปุ่ม YouTube'}</button><p className="micro">หากยังเงียบ ให้แตะ ▶ / เปิดเสียงในวิดีโอ และเช็กระดับเสียงเครื่อง</p></div>}
+        {audioHint&&<p role="status" className="notice">{audioHint}</p>}
+        <div className="listening-bar"><div><span className={`status-dot ${enabled ? 'on' : ''}`} /><span>{enabled ? 'คุณอยู่ในห้องฟังเพลง' : 'เข้าฟังเมื่อคุณพร้อม'}</span></div><button className={`btn ${enabled ? 'secondary' : 'primary'}`} disabled={Boolean(current)&&!ready} onClick={toggleListening}>{enabled ? 'ออกจากการฟัง' : 'เข้าฟัง YouTube'} {enabled ? '↗' : '♫'}</button></div>
         {error && <p role="alert" className="notice">{error}</p>}
         </div>
-        <aside className="queue-panel"><div className="panel-top"><div><span className="eyebrow">PICK THE NEXT VIBE</span><h2>คิวของพวกเรา <span className="count">{state?.queue.length || 0}</span></h2></div><span className="queue-symbol">≋</span></div>
+        <aside className="queue-panel" id="room-sidebar"><div className="panel-top"><div><span className="eyebrow">PICK THE NEXT VIBE</span><h2>คิวของพวกเรา <span className="count">{state?.queue.length || 0}</span></h2></div><span className="queue-symbol">≋</span></div>
         <div className="queue-tabs" role="tablist" aria-label="คิวเพลงและประวัติ" onKeyDown={e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tabs=['queue','chat','log'] as const;const index=tabs.indexOf(activeTab);const next=tabs[e.key==='Home'?0:e.key==='End'?2:(index+(e.key==='ArrowRight'?1:2))%3];setActiveTab(next);document.getElementById(`music-${next}-tab`)?.focus();}}}>
             <button id="music-queue-tab" role="tab" aria-selected={activeTab==='queue'} aria-controls="music-queue-panel" tabIndex={activeTab==='queue'?0:-1} onClick={()=>setActiveTab('queue')}>♫ คิวเพลง</button>
             <button id="music-chat-tab" role="tab" aria-selected={activeTab==='chat'} aria-controls="music-chat-panel" tabIndex={activeTab==='chat'?0:-1} onClick={()=>setActiveTab('chat')}>☏ แชต {unread>0&&<span className="unread-badge">{unread>99?'99+':unread}</span>}</button>
