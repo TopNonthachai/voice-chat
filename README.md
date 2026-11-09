@@ -82,7 +82,7 @@ If port 3001 is occupied, set PORT to another port and open that backend directl
 
 Profiles have an optional status (up to 80 characters), empty by default. Edit or clear it from the profile form. The microphone toggle is on your own profile card. The UI calls the shared space a room.
 
-The queue sidebar has Queue and History tabs. The server records successful add/remove/reorder/select/play/pause/seek/skip/shuffle/repeat actions with the participant name and server timestamp. Automatic transitions are attributed to the system. Everyone in the room, including late joiners, receives the same last 100 entries; history resets on server restart. Invalid commands and duplicate end reports do not create entries. Removed song details remain in history.
+The right sidebar has Chat, Music/Queue and History tabs. The server records successful add/remove/reorder/select/play/pause/seek/skip/shuffle/repeat actions with the participant name and server timestamp. Automatic transitions do not create history entries. Each user action includes the actor avatar and track thumbnail, and history can be searched by actor, song or action. Everyone in the room, including late joiners, receives the same last 100 entries; history resets on server restart. Invalid commands and duplicate end reports do not create entries. Removed song details remain in history.
 
 ## Room chat and attachments
 
@@ -104,7 +104,7 @@ The player shows connection/sync status and a manual resync button. Resync fetch
 
 Create rooms from the home page. The server generates an 8-character room ID and a separate random 12-character invite token; copied links use `/#/r/<invite>`. Room IDs alone cannot enter private rooms. The creator receives an owner credential stored in that browser. Credentials are never included in invite links or participant lists. Keep that browser's site storage to retain ownership while the server is running.
 
-New rooms require invitation links by default. The owner can switch to room-code access, lock admission of new members, and rotate invitations (old invite links stop working). Existing members with valid credentials can reconnect while locked. Ownership is retained when the owner disconnects; it is not handed to the next visitor. Room state and credentials remain in memory and reset on server restart, so rooms/links must be created again after a deploy. Unknown/expired rooms do not silently create a new room.
+New rooms allow room-code access by default. The owner can require invitation links, lock admission of new members, and rotate invitations (old invite links stop working; the room ID stays unchanged). Existing members with valid credentials can reconnect while locked. Unexpected disconnects keep the member visible offline and reserve ownership for three minutes. Returning with the saved credential cancels expiry. After expiry, ownership passes to the next online member. The owner can transfer ownership explicitly; using Leave room hands it off immediately. Room state and credentials remain in memory and reset on server restart, so rooms/links must be created again after a deploy. Unknown/expired rooms do not silently create a new room.
 
 Owners can force-mute a member or remove them. A forced-muted client disables microphone tracks and cannot turn the microphone back on until allowed. Recipients also silence that member's audio. Allowing the mic does not automatically enable it; the member chooses when to unmute. Removing a member revokes their room credential, removes Socket.IO membership and closes voice connections in the normal client. It blocks that saved browser identity, not an account/IP ban; a person with a fresh browser identity and a valid invite could join again while admission is open. Lock or rotate the invitation when needed. Voice is PeerJS P2P, so this is cooperative-client moderation rather than a server-side audio relay.
 
@@ -118,6 +118,43 @@ Integration tests cover owner authorization, invite-only admission, room locks, 
 
 YouTube uses a prepared IFrame API player instead of mounting a new ReactPlayer after the listening button is tapped. The same iframe is reused between songs. Explicit local audio start calls unMute, setVolume and playVideo synchronously in the user gesture. Safari/iOS initially exposes the native YouTube controls; autoplay-blocked events and a local Open audio button expose a direct in-frame play/unmute fallback. Shared controls remain separate from local listening, and local player state is shown independently of the room clock. Programmatic seeks while paused do not turn into shared play commands.
 
-Mobile layouts include safe-area padding, larger tap targets and 16px text inputs, a bottom Music/Queue/Chat/People navigation bar, collapsible owner settings, readable queue items, a two-column participant grid (one column at narrow widths), and chat/composer sizing for short viewports. The player stage has an explicit 100% width to avoid aspect-ratio/min-height overflow.
+Mobile layouts include safe-area padding, larger tap targets and 16px text inputs, a bottom Music/Queue/Chat/People navigation bar, a header settings dropdown, readable queue items, a two-column participant grid (one column at narrow widths), and chat/composer sizing for short viewports. The player stage has an explicit 100% width to avoid aspect-ratio/min-height overflow.
 
 Validation covers 320px and 390px browser viewports without horizontal overflow, readiness before local start, direct YouTube play fallback, shared pause, seeking to zero while paused, and mobile chat shortcuts. Unit coverage verifies that local unmute/volume/play calls remain synchronous. Desktop browser emulation does not verify physical iPhone Safari speaker output: retest on the actual iPhone after deployment. Browser/system mute and the phone's media volume can still affect audibility.
+
+
+## Shared workspace and room lifecycle
+
+The home page pre-fills a random name and avatar for new visitors. Character selection remains visible; speaking animation is on by default and respects reduced-motion preferences. The room has persistent YouTube/Screen tabs, an explicit local Join button in the video header, participant cards spanning the full width below the viewer/sidebar, and a non-sticky desktop sidebar. On phones, the sidebar follows the viewer and participants in normal document flow. Switching video tabs preserves the YouTube iframe.
+
+Shuffle uses the IDs of tracks actually opened in the current round, rather than assuming every track before the current list position has played. The visible queue becomes previously played tracks, the current track, then shuffled unplayed tracks. Jumping from 2 to 7 keeps 3–6 pending. Playback follows that displayed order. Repeat with shuffle reshuffles the entire queue before starting a new round and avoids immediately repeating the last track when there is more than one track. Automatic end-of-track events do not fill user history.
+
+Own chat messages align right, using a stable, non-secret member ID so reconnecting does not turn earlier own messages into other people's messages. The owner has a per-member overflow menu for transfer/kick, plus separate mute and volume controls. Offline members remain visible for the three-minute reconnect window. Room data still lives in memory and resets after restart/deployment.
+
+Muted microphones do not hold physical capture; a silent Web Audio sender preserves audio negotiation. Capture starts only on the microphone button. Per-room notification sounds (join, leave, incoming chat, screen share) are quiet synthesized tones, can be disabled in settings and require a prior user interaction to unlock browser audio. No sounds are fetched from third parties.
+
+
+## Late screen viewers
+
+Active screen IDs/names are synchronized from current room membership independently of received video. A late viewer caches this list while PeerJS opens and then requests video explicitly in the offer, using the silent sender rather than microphone capture. The LIVE indicator uses advertised state, not video arrival. Failed/timed-out screen calls retry up to three times and offer a manual reconnect button; stop/departure removes the advertised screen and cancels pending calls. Existing screen-sharing users reannounce on room reconnect. Media still flows directly between peers; no TURN relay is configured.
+
+
+## Live and message reactions
+
+The video panel has six live emoji buttons. Room members receive a temporary floating emoji with the sender name; it is not replayed to late joiners. Each viewer can disable effects locally, and reduced-motion settings use a stationary fade. Effects ignore pointer events, are capped at 16 on screen and expire after 3.2 seconds.
+
+Chat reactions are explicit add/remove actions, grouped by emoji with counts and member names. A stable member ID prevents reconnects or retries from adding a second vote; revision numbers protect against older message responses overwriting newer reactions. Reactions live with the last 100 chat messages in server memory and reset on restart. The server validates room membership and emoji choices and permits at most eight reaction actions per five seconds per connection, shared between live and chat reactions.
+
+
+## Shared board
+
+The Board tab follows Friend screens. Room members can draw with four pen colors and three widths, undo their own strokes, and add/move/edit/delete paper notes in four colors. Pointer drawing supports mouse, pen and touch; the move/select tool allows page scrolling on touch devices. Stroke commits are shared on pointer release. Sticky-note text saves on blur or the save button, and note headers support dragging or arrow keys.
+
+Board snapshots restore drawings and notes for late joiners and reconnects. Stroke ownership uses stable member IDs. Text and position revisions are independent; conflicting edits preserve the local draft and show the latest saved text before an explicit retry. Commands are membership checked, idempotent by request ID and rate limited. Each room holds at most 200 strokes (300 points each) and 40 notes (500 characters each) in memory; restart/deployment clears the board.
+
+
+## Room random box
+
+The Random box tab follows Board. Anyone in a room can add newline-separated choices, remove entries, change no-repeat mode and start a shared three-second draw. Choices are trimmed/deduplicated and limited to 50 entries of 80 characters. The server uses crypto.randomInt to choose one uniformly from eligible entries. It withholds the selected entry until the server countdown ends; clients animate locally and display only the authoritative result.
+
+Only one draw can run per room. Option edits and resets are locked until completion. Commands are idempotent by stable member/request ID and membership checked. No-repeat mode tracks drawn option IDs; after all eligible entries have won, the next draw starts a new round. New choices join the current round. A manual round reset preserves choices and history. The last 20 results retain their original labels even if an option is later deleted. Late joiners/reconnecting clients receive the active draw or final result. State is held in memory and resets on deployment/restart.

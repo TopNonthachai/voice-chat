@@ -1,5 +1,6 @@
 const { randomUUID } = require('node:crypto');
 const express = require('express');
+const {acceptReaction,validEmoji}=require('./reaction-server.cjs');
 const MAX_FILE = 5 * 1024 * 1024;
 function registerChat(io, app, getProfile, {now=Date.now,fileTtlMs=24*60*60*1000,cleanupIntervalMs=60000}={}) {
     const rooms = new Map();
@@ -27,7 +28,7 @@ function registerChat(io, app, getProfile, {now=Date.now,fileTtlMs=24*60*60*1000
     const publish = (socket, roomId, clientId, text, attachment) => {
         const room = roomState(roomId);
         const profile = getProfile(roomId,socket.data.userId) || {};
-        const message = {id:randomUUID(),sequence:++room.sequence,clientId,senderId:socket.data.userId,senderSocketId:socket.id,name:profile.name || socket.data.userName || 'Guest',avatar:profile.avatar || '🌻',text,timestamp:now(),attachment};
+        const message = {id:randomUUID(),sequence:++room.sequence,clientId,senderId:socket.data.userId,senderMemberId:socket.data.memberId,senderSocketId:socket.id,name:profile.name || socket.data.userName || 'Guest',avatar:profile.avatar || '🌻',text,timestamp:now(),attachment};
         room.messages.push(message);
         while(room.messages.length>100){const old=room.messages.shift();if(old.attachment){const file=files.get(old.attachment.id);if(file){room.bytes-=file.bytes.length;totalBytes-=file.bytes.length;files.delete(old.attachment.id);}}}
         io.to(roomId).emit('chat-message',message);
@@ -37,6 +38,30 @@ function registerChat(io, app, getProfile, {now=Date.now,fileTtlMs=24*60*60*1000
     const validId = id => typeof id==='string' && /^[a-zA-Z0-9-]{8,80}$/.test(id);
     io.on('connection',socket=>{
         socket.on('chat-sync',(payload={})=>{const {roomId}=payload||{};if(member(roomId,socket.id)){sweepExpired();socket.emit('chat-history',roomState(roomId).messages);}});
+        socket.on('chat-react',(data={},ack=()=>{})=>{
+            if(typeof ack!=='function')ack=()=>{};
+            const {roomId,messageId,emoji,enabled}=data||{};
+            if(!member(roomId,socket.id))return ack({error:'กรุณาเข้าห้องก่อนส่งรีแอ็กชัน'});
+            if(typeof messageId!=='string'||!validEmoji(emoji)||typeof enabled!=='boolean')return ack({error:'รีแอ็กชันไม่ถูกต้อง'});
+            const message=roomState(roomId).messages.find(item=>item.id===messageId);
+            if(!message)return ack({error:'ข้อความนี้ไม่อยู่ในประวัติแล้ว'});
+            if(!acceptReaction(socket))return ack({error:'ส่งถี่ไปนิด รอสักครู่แล้วลองใหม่'});
+            const id=socket.data.memberId||socket.data.userId;
+            message.reactions??=[];
+            let group=message.reactions.find(group=>group.emoji===emoji);
+            const already=group?.users.some(user=>user.id===id)||false;
+            if(already!==enabled){
+                if(enabled){
+                    if(group?.users.length>=100)return ack({error:'รีแอ็กชันนี้เต็มแล้ว'});
+                    if(!group){group={emoji,users:[]};message.reactions.push(group);}
+                    group.users.push({id,name:socket.data.userName||'เพื่อน'});
+                }else group.users=group.users.filter(user=>user.id!==id);
+                message.reactions=message.reactions.filter(group=>group.users.length);
+                message.reactionRevision=(message.reactionRevision||0)+1;
+                io.to(roomId).emit('chat-reactions',{messageId,reactions:message.reactions,revision:message.reactionRevision});
+            }
+            ack({ok:true,reactions:message.reactions,revision:message.reactionRevision||0});
+        });
         socket.on('chat-send',(data={},ack=()=>{})=>{
             if(typeof ack!=='function') ack=()=>{};
             const {roomId,clientId,text}=data || {};

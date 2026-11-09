@@ -18,7 +18,7 @@ function videoId(input) {
 
 function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
     const rooms = new Map();
-    const empty = () => ({ queue: [], currentId: null, playing: false, position: 0, updatedAt: Date.now(), revision: 0, generation: 0, shuffle: false, repeat: false, remaining: [], finished: false, activity: [] });
+    const empty = () => ({ queue: [], currentId: null, playing: false, position: 0, updatedAt: Date.now(), revision: 0, generation: 0, shuffle: false, repeat: false, remaining: [], played: [], finished: false, activity: [] });
     function snapshot(state) {
         const now = Date.now();
         return { ...state, position: state.position + (state.playing ? Math.max(0, now - state.updatedAt) / 1000 : 0), updatedAt: now };
@@ -41,13 +41,16 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
             const next = snapshot(state);
             next.queue = [...state.queue];
             next.remaining = [...state.remaining];
-            const select = id => {
+            next.played = [...(state.played||[])];
+            const select = (id,markPlayed=true) => {
                 next.currentId = id;
                 next.position = 0;
                 next.playing = Boolean(id);
                 next.finished = false;
                 next.generation++;
                 next.remaining = next.remaining.filter(value => value !== id);
+                if(id&&markPlayed&&!next.played.includes(id))next.played.push(id);
+                if(next.shuffle)orderShuffle(false);
             };
             const shuffled = ids => {
                 for (let i = ids.length - 1; i > 0; i--) {
@@ -56,22 +59,31 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                 }
                 return ids;
             };
+            const shuffleTail = start => { next.queue = [...next.queue.slice(0,start),...shuffled(next.queue.slice(start))]; };
+            // Playback history is independent of list position: jumping over a song
+            // must not mark it as heard. Keep history/current before the pending queue.
+            const orderShuffle = randomize => {
+                const byId=new Map(next.queue.map(item=>[item.id,item]));
+                next.played=next.played.filter(id=>byId.has(id));
+                const history=next.played.filter(id=>id!==next.currentId).map(id=>byId.get(id));
+                const current=byId.get(next.currentId);
+                const pending=next.queue.filter(item=>item.id!==next.currentId&&!next.played.includes(item.id));
+                next.queue=[...history,...(current?[current]:[]),...(randomize?shuffled(pending):pending)];
+            };
             const advance = () => {
-                let id;
-                if (next.shuffle) {
-                    next.remaining = next.remaining.filter(id => next.queue.some(item => item.id === id));
-                    if (!next.remaining.length && next.repeat) {
-                        next.remaining = shuffled(next.queue.map(item => item.id));
-                        if (next.remaining[0] === next.currentId && next.remaining.length > 1)
-                            [next.remaining[0], next.remaining[1]] = [next.remaining[1], next.remaining[0]];
+                const index=next.queue.findIndex(item=>item.id===next.currentId);
+                let id=next.shuffle?next.queue.find(item=>item.id!==next.currentId&&!next.played.includes(item.id))?.id:next.queue[index+1]?.id;
+                if(!id&&next.repeat&&next.queue.length){
+                    next.played=[];
+                    if(next.shuffle){
+                        shuffleTail(0);
+                        if(next.queue.length>1&&next.queue[0].id===next.currentId)
+                            [next.queue[0],next.queue[1]]=[next.queue[1],next.queue[0]];
                     }
-                    id = next.remaining.shift();
-                } else {
-                    const index = next.queue.findIndex(item => item.id === next.currentId);
-                    id = next.queue[index + 1]?.id || (next.repeat ? next.queue[0]?.id : null);
+                    id=next.queue[0].id;
                 }
-                if (id) select(id);
-                else { next.playing = false; next.finished = true; if (action === 'ended') next.position = data.duration; }
+                if(id)select(id);
+                else {next.playing=false;next.finished=true;if(action==='ended')next.position=data.duration;}
             };
             switch (action) {
                 case 'import': {
@@ -86,7 +98,7 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                     if((data.mode==='append'?next.queue.length:0)+parsed.length>100)return ack({error:'คิวจะเกิน 100 เพลง กรุณาลดจำนวนเพลงก่อน'});
                     if(!parsed.length)return ack({error:'เพลงทั้งหมดอยู่ในคิวแล้ว'});
                     if(data.mode==='replace'){
-                        next.queue=parsed;next.remaining=shuffled(parsed.map(item=>item.id));select(parsed[0].id);next.playing=false;
+                        next.queue=parsed;next.played=[];next.remaining=[];select(parsed[0].id,false);next.playing=false;
                     }else{
                         next.queue.push(...parsed);if(next.shuffle)next.remaining.push(...shuffled(parsed.map(item=>item.id)));
                         if(!next.currentId){select(parsed[0].id);next.playing=false;}
@@ -114,7 +126,8 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                         next.position = data.position;
                         next.finished = false;
                     } else if (action === 'play' && next.finished) {
-                        if (next.shuffle) { next.remaining = shuffled(next.queue.map(item => item.id)); select(next.remaining.shift()); }
+                        next.played=[];
+                        if (next.shuffle) { shuffleTail(0); select(next.queue[0]?.id||null); }
                         else select(next.queue[0]?.id || null);
                     } else next.playing = action === 'play';
                     break;
@@ -136,7 +149,7 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                     if (typeof data.enabled !== 'boolean') return ack({ error: 'Invalid shuffle mode.' });
                     if (next.shuffle !== data.enabled) {
                         next.shuffle = data.enabled;
-                        next.remaining = shuffled(next.queue.filter(item => item.id !== next.currentId).map(item => item.id));
+                        if(next.shuffle)orderShuffle(true);
                     }
                     break;
                 case 'repeat':
@@ -148,7 +161,10 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                     if (index < 0) return ack({ error: 'Song not found.' });
                     next.queue.splice(index, 1);
                     next.remaining = next.remaining.filter(id => id !== data.id);
-                    if (data.id === next.currentId) select(next.queue[index]?.id || next.queue[index - 1]?.id || null);
+                    if (data.id === next.currentId) {
+                        if(next.shuffle){next.currentId=null;advance();}
+                        else select(next.queue[index]?.id || next.queue[index - 1]?.id || null);
+                    }
                     break;
                 }
                 case 'move': {
@@ -160,6 +176,10 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                 }
                 default: return ack({ error: 'Unknown command.' });
             }
+            if(next.playing&&next.currentId&&!next.played.includes(next.currentId))next.played.push(next.currentId);
+            next.played=next.played.filter(id=>next.queue.some(item=>item.id===id));
+            if(next.shuffle)orderShuffle(false);
+            next.remaining=(next.shuffle?next.queue.filter(item=>item.id!==next.currentId&&!next.played.includes(item.id)):next.queue.slice(next.queue.findIndex(item=>item.id===next.currentId)+1)).map(item=>item.id);
             const affected = (action === 'add' ? next.queue.at(-1) : state.queue.find(item => item.id === (data.id || state.currentId)));
             const labels = {
                 import: `นำเข้าเพลย์ลิสต์ ${data.importedCount||0} เพลง (${data.mode==='replace'?'แทนที่คิว':'เพิ่มต่อท้าย'})`,
@@ -170,9 +190,9 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                 shuffle: data.enabled ? 'เปิดสุ่มคิว' : 'ปิดสุ่มคิว', repeat: data.enabled ? 'เปิดวนทั้งคิว' : 'ปิดวนทั้งคิว'
             };
             const target = ['next', 'ended'].includes(action) ? next.queue.find(item => item.id === next.currentId) : affected;
-            next.activity = [...(state.activity || []), {
+            next.activity = action==='ended' ? [...(state.activity||[])] : [...(state.activity || []), {
                 id: randomUUID(), timestamp: Date.now(), actor: action === 'ended' ? 'ระบบ' : socket.data.userName || 'Guest',
-                action, message: labels[action], trackId: target?.id, title: target?.title || '',
+                action, message: labels[action], trackId: target?.id, videoId: target?.videoId, title: target?.title || '', avatar:socket.data.profile?.avatar||'🌻',
                 position: action === 'seek' ? data.position : undefined
             }].slice(-100);
             next.revision++;
@@ -184,7 +204,7 @@ function registerMusic(io, {resolveTitle=createTitleResolver()}={}) {
                 Promise.resolve().then(()=>resolveTitle(added.videoId)).then(metadata=>{
                     if(!metadata)return;
                     const current=rooms.get(roomId);
-                    if(!current?.queue.some(item=>item.id===added.id))return;
+                    if(!current||(!current.queue.some(item=>item.id===added.id)&&!current.activity.some(entry=>entry.trackId===added.id)))return;
                     const updated={...current,revision:current.revision+1,
                         queue:current.queue.map(item=>item.id===added.id?{...item,title:metadata.title,author:metadata.author}:item),
                         activity:current.activity.map(entry=>entry.trackId===added.id?{...entry,title:metadata.title}:entry)};

@@ -1,11 +1,15 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { io, Socket } from 'socket.io-client';
 import Peer from 'peerjs';
 import AudioVisualizer from './AudioVisualizer';
 import YoutubeBot from './YoutubeBot';
 import ProfileForm, { Avatar, Profile } from './Profile';
 import { getMemberToken, saveMemberToken } from './room-access';
+import RoomSettings from './RoomSettings';
+import {createScreenReceiver} from './screen-receiver.mjs';
+import {notifyRoom,setNotificationSound,unlockNotifications} from './room-notifications';
+type Member = Profile & {forcedMuted?:boolean;isOwner?:boolean;online?:boolean;voiceReady?:boolean;offlineUntil?:number;memberId?:string};
 
 const getSocketUrl = () => {
     if (['localhost', '127.0.0.1'].includes(window.location.hostname) && ['3000', '5173'].includes(window.location.port)) return `${window.location.protocol}//${window.location.hostname}:3001`;
@@ -24,14 +28,19 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     profileRef.current = profile;
     const myName = profile.name;
     const [editing, setEditing] = useState(false);
-    const [members, setMembers] = useState<Record<string, Profile & {forcedMuted?:boolean;isOwner?:boolean}>>({});
+    const [members, setMembers] = useState<Record<string, Member>>({});
     const [copied, setCopied] = useState(false);
+    const [memberId,setMemberId]=useState('');
+    const [clock,setClock]=useState(Date.now());
+    const [notifications,setNotifications]=useState(()=>{try{return localStorage.getItem('mellow-notifications')!=='off';}catch{return true;}});
+    useEffect(()=>{setNotificationSound(notifications);try{localStorage.setItem('mellow-notifications',notifications?'on':'off');}catch{}},[notifications]);
+    useEffect(()=>{document.addEventListener('pointerdown',unlockNotifications);document.addEventListener('keydown',unlockNotifications);const timer=setInterval(()=>setClock(Date.now()),1000);return()=>{clearInterval(timer);document.removeEventListener('pointerdown',unlockNotifications);document.removeEventListener('keydown',unlockNotifications);};},[]);
     const [sidebarRequest,setSidebarRequest]=useState<{tab:'queue'|'chat';id:number}>();
     const [settings,setSettings]=useState<{invite:string;locked:boolean;inviteOnly:boolean;isOwner:boolean}|null>(null);
     const [joined,setJoined]=useState(false),[blocked,setBlocked]=useState('');
     const [forcedMuted,setForcedMuted]=useState(false);
     const forcedRef=useRef(false),blockedRef=useRef(false);
-    const membersRef=useRef<Record<string,Profile & {forcedMuted?:boolean;isOwner?:boolean}>>({});
+    const membersRef=useRef<Record<string,Member>>({});
     const [volumes,setVolumes]=useState<Record<string,number>>({});
 
     const socketUrl = getSocketUrl();
@@ -58,6 +67,9 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     const socketRef = useRef<Socket | null>(null);
     const peerRef = useRef<Peer | null>(null);
     const screenPeerRef = useRef<Peer | null>(null);
+    const screenReceiverRef=useRef<ReturnType<typeof createScreenReceiver>|null>(null);
+    const [remoteScreens,setRemoteScreens]=useState<{id:string;name:string}[]>([]);
+    const [screenStatus,setScreenStatus]=useState('idle');
     const peersMapRef = useRef<Map<string, any>>(new Map());
     const myStreamRef = useRef<MediaStream | null>(null);
     const screenStreamRef = useRef<MediaStream|null>(null);
@@ -141,6 +153,18 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
         const socket = io(socketUrl, { transports: ['websocket', 'polling'], reconnection: true });
         socketRef.current = socket;
+        const receiver=createScreenReceiver({getPeer:()=>peerRef.current,getStream:()=>silentRef.current,onStream:stream=>{if(mounted)setRemoteScreenStream(stream);},onStatus:status=>{if(mounted)setScreenStatus(status);}});
+        screenReceiverRef.current=receiver;
+        let advertisedScreens:{id:string;name:string}[]=[];
+        let hasScreenSnapshot=false;
+        const updateScreens=(screens:{id:string;name:string}[])=>{
+            const remote=screens.filter(screen=>screen.id!==`${peerRef.current?.id}-screen`);
+            if(hasScreenSnapshot&&remote.some(screen=>!advertisedScreens.some(old=>old.id===screen.id)))notifyRoom('screen');
+            hasScreenSnapshot=true;
+            advertisedScreens=remote;setRemoteScreens(remote);receiver.update(remote);
+        };
+        socket.on('screen-state',updateScreens);
+        socket.on('screen-stopped',({userId}:{userId?:string}={})=>{if(userId)updateScreens(advertisedScreens.filter(screen=>screen.id!==userId));});
         socket.on('connect', () => {
             setSocketConnected(true);
             socket.emit('join-room', roomId, peerRef.current?.id || socket.id, profileRef.current.name, profileRef.current,{invite,memberToken:getMemberToken(roomId)});
@@ -156,18 +180,19 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
             silentRef.current?.getTracks().forEach(track=>track.stop());
             void silentContextRef.current?.close().catch(() => {});
             peersMapRef.current.forEach(call=>call.close());peersMapRef.current.clear();
-            peerRef.current?.destroy();screenPeerRef.current?.destroy();screenStreamRef.current?.getTracks().forEach(track=>track.stop());setPeers([]);socket.disconnect();
+            peerRef.current?.destroy();receiver.dispose();screenPeerRef.current?.destroy();screenStreamRef.current?.getTracks().forEach(track=>track.stop());setPeers([]);socket.disconnect();
         };
         socket.on('room-denied',deny);socket.on('room-kicked',deny);
         socket.on('room-moderation',({forcedMuted}:{forcedMuted:boolean})=>applyMuted(forcedMuted));
         socket.on('room-settings',setSettings);
-        socket.on('room-joined',(result)=>{saveMemberToken(roomId,result.memberToken);setSettings(result.settings);applyMuted(result.forcedMuted);setJoined(true);socket.emit('music-sync',{roomId});socket.emit('chat-sync',{roomId});});
+        socket.on('room-notice',({type}:{type:'join'|'leave'})=>notifyRoom(type));
+        socket.on('room-joined',(result)=>{setMemberId(result.memberId);saveMemberToken(roomId,result.memberToken);setSettings(result.settings);applyMuted(result.forcedMuted);setJoined(true);receiver.ready();socket.emit('screen-sync');if(screenPeerRef.current?.id)socket.emit('screen-start',{roomId,userId:screenPeerRef.current.id});socket.emit('music-sync',{roomId});socket.emit('chat-sync',{roomId});});
         socket.on('room-members',next=>{
             membersRef.current=next;setMembers(next);
-            peersMapRef.current.forEach((call,id)=>{if(!next[id]){call.close();peersMapRef.current.delete(id);}});
-            setPeers(previous=>previous.filter(peer=>Boolean(next[peer.userId])));
+            peersMapRef.current.forEach((call,id)=>{if(!next[id]?.online){call.close();peersMapRef.current.delete(id);}});
+            setPeers(previous=>previous.filter(peer=>Boolean(next[peer.userId]?.online)));
         });
-        socket.on('disconnect', () => setSocketConnected(false));
+        socket.on('disconnect', () => {setSocketConnected(false);peersMapRef.current.forEach(call=>call.close());peersMapRef.current.clear();setPeers([]);screenReceiverRef.current?.disconnected();setRemoteScreenStream(null);});
         socket.on('connect_error', () => setSocketConnected(false));
 
         const init = async () => {
@@ -201,12 +226,14 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
                 peer.on('open', (id) => {
                     console.log("🆔 My Peer ID:", id);
-                    setUserId(id);
+                    setUserId(id);receiver.ready();
+                    if(socket.connected)socket.emit('join-room',roomId,id,profileRef.current.name,profileRef.current,{invite,memberToken:getMemberToken(roomId)});
                 });
 
                 peer.on('call', (call) => {
                     console.log("📞 [Incoming Call] from:", call.peer);
-                    if(blockedRef.current || !membersRef.current[call.peer]){call.close();return;}
+                    if(blockedRef.current || !membersRef.current[call.peer]?.online){call.close();return;}
+                    peersMapRef.current.get(call.peer)?.close();
                     call.answer(myStreamRef.current || stream);
                     peersMapRef.current.set(call.peer, call);
 
@@ -227,38 +254,20 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
                     console.error("❌ [PeerJS Error]:", err.type, err);
                 });
 
-                socket.on('user-connected', ({ userId: otherId, userName }: { userId: string, userName: string }) => {
-                    console.log("👤 [Socket] User Joined:", userName, "(ID:", otherId, ")");
-                    setPeerNames(prev => ({ ...prev, [otherId]: userName }));
-
-                    setTimeout(() => {
-                        if (peerRef.current && mounted && !blockedRef.current && membersRef.current[otherId]) {
-                            console.log("📡 [Outgoing Call] Calling:", otherId);
-                            if (peersMapRef.current.has(otherId)) return;
-                            const call = peerRef.current.call(otherId, myStreamRef.current || stream);
-
-                            if (call) {
-                                call.on('stream', (remoteStream) => {
-                                    console.log("🔊 [Outgoing Stream Received] from:", otherId);
-                                    addPeerStream(otherId, remoteStream);
-                                });
-
-                                const pc = (call as any).peerConnection as RTCPeerConnection;
-                                if (pc) {
-                                    pc.oniceconnectionstatechange = () => {
-                                        console.log(`🌐 [ICE State] with ${otherId}: ${pc.iceConnectionState}`);
-                                    };
-                                }
-                                peersMapRef.current.set(otherId, call);
-                            }
-                        }
-                    }, 2500); // เพิ่มเวลาหน่วงเป็น 2.5 วินาที
+                const connectTo=(otherId:string)=>{
+                    if(!peer.id||peer.id>=otherId||blockedRef.current||!membersRef.current[otherId]?.online||membersRef.current[otherId]?.voiceReady===false||peersMapRef.current.has(otherId))return;
+                    const call=peer.call(otherId,myStreamRef.current||stream);
+                    if(!call)return;
+                    peersMapRef.current.set(otherId,call);
+                    call.on('stream',remote=>{if(mounted)addPeerStream(otherId,remote);});
+                    call.on('close',()=>{if(peersMapRef.current.get(otherId)===call){peersMapRef.current.delete(otherId);removePeerStream(otherId);}});
+                    call.on('error',()=>{if(peersMapRef.current.get(otherId)===call)peersMapRef.current.delete(otherId);});
+                };
+                socket.on('user-connected',({userId:otherId})=>{setTimeout(()=>{if(mounted)connectTo(otherId);},300);});
+                socket.on('existing-users',(users:Record<string,string>)=>{
+                    setPeerNames(users);Object.keys(users).forEach(connectTo);
                 });
-
-                socket.on('existing-users', (users: {[key: string]: string}) => {
-                    setPeerNames(prev => ({ ...prev, ...users }));
-                });
-
+                peer.on('disconnected',()=>{if(mounted&&!peer.destroyed)peer.reconnect();});
                 socket.on('user-disconnected', (id: string) => {
                     removePeerStream(id);
                     if (peersMapRef.current.has(id)) {
@@ -267,19 +276,6 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
                     }
                 });
 
-                socket.on('screen-shared', ({ userId: screenId }) => {
-                    console.log("🖥️ [Socket] Screen Shared by:", screenId);
-                    if (peerRef.current) {
-                        const call = peerRef.current.call(screenId, myStreamRef.current || stream);
-                        call.on('stream', (remoteStream) => {
-                            setRemoteScreenStream(remoteStream);
-                        });
-                    }
-                });
-
-                socket.on('screen-stopped', () => {
-                    setRemoteScreenStream(null);
-                });
 
             } catch (err) {
                 console.error("Initialization failed:", err);
@@ -295,6 +291,7 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
             if (socketRef.current) socketRef.current.disconnect();
             if (peerRef.current) peerRef.current.destroy();
             screenPeerRef.current?.destroy();
+            screenReceiverRef.current?.dispose();screenReceiverRef.current=null;
             screenStreamRef.current?.getTracks().forEach(track=>track.stop());
             if (myStreamRef.current) myStreamRef.current.getTracks().forEach(t => t.stop());
             silentRef.current?.getTracks().forEach(track => track.stop());
@@ -311,7 +308,7 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
 
     const addPeerStream = (id: string, stream: MediaStream) => {
         setPeers(prev => {
-            if (prev.find(p => p.userId === id)) return prev;
+            if (prev.find(p => p.userId === id)) return prev.map(p=>p.userId===id?{userId:id,stream}:p);
             return [...prev, { userId: id, stream }];
         });
     };
@@ -352,8 +349,11 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
                 });
 
                 screenPeer.on('call', (call) => {
+                    if(!membersRef.current[call.peer]?.online){call.close();return;}
                     call.answer(stream);
                 });
+                screenPeer.on('disconnected',()=>{if(!screenPeer.destroyed&&screenStreamRef.current)screenPeer.reconnect();});
+                screenPeer.on('error',()=>{setVoiceError('เชื่อมต่อแชร์จอไม่ได้ ลองหยุดแล้วแชร์ใหม่');stopScreenShare();});
 
                 stream.getVideoTracks()[0].onended = stopScreenShare;
             } catch (err) {
@@ -368,7 +368,8 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     };
 
     const leaveRoom = () => {
-        navigate('/');
+        if(!socketRef.current?.connected){navigate('/');return;}
+        socketRef.current.timeout(1000).emit('leave-room',()=>navigate('/'));
     };
 
     const manage=(action:string,extra:Record<string,unknown>={})=>{
@@ -376,20 +377,19 @@ const Room: React.FC<{ initialProfile: Profile; roomId: string; invite?: string 
     };
     if(blocked)return <main className="entry-shell"><section className="entry-card"><h1>เข้าห้องไม่ได้</h1><p className="notice">{blocked}</p><button className="btn primary" onClick={()=>navigate('/')}>กลับหน้าหลัก</button></section></main>;
     const ownId = userId || socketRef.current?.id || '';
-    return <div className="room-shell">
-        <header className="room-header"><a className="wordmark" href="#/">mellow<span>●</span></a><div className="room-heading"><span className="eyebrow">YOUR SHARED CORNER</span><strong>ห้องของพวกเรา</strong></div><span className="connection"><i className={`status-dot ${socketConnected ? 'on' : ''}`} />{socketConnected ? 'เชื่อมต่อแล้ว' : 'กำลังเชื่อมต่อ…'}</span>
-        <div className="header-actions"><button className="btn secondary" disabled={!settings?.invite} onClick={copyRoomId}>{copied ? '✓ คัดลอกแล้ว' : '↗ ชวนเพื่อน'}</button><button className="profile-chip" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} /><span>{profile.name}</span><span>⌄</span></button><button className="btn ghost" onClick={leaveRoom}>ออกจากห้อง</button></div></header>
-        <main className="room-main"><div className="room-intro"><div><span className="eyebrow">SETTLE IN. STAY A WHILE.</span><h1>เปิดเพลง แล้วมาอยู่ด้วยกัน<span className="accent">.</span></h1></div><p>ส่งเพลงให้กัน เหมือนนั่งอยู่ข้าง ๆ</p></div>
-        {settings?.isOwner&&<details className="owner-settings"><summary>⚙ จัดการห้อง <span>{settings.locked?'ล็อกแล้ว':'เปิดรับเพื่อน'}</span></summary><section className="owner-panel"><div><span className="eyebrow">ROOM OWNER</span><strong>จัดการห้อง</strong><small>รหัสห้อง {roomId}</small></div><label className="check-row"><input type="checkbox" checked={settings.inviteOnly} onChange={e=>manage('invite-only',{enabled:e.target.checked})}/>เข้าผ่านลิงก์เชิญเท่านั้น</label><label className="check-row"><input type="checkbox" checked={settings.locked} onChange={e=>manage('lock',{enabled:e.target.checked})}/>ล็อกไม่รับคนเพิ่ม</label><button className="btn secondary" onClick={()=>manage('rotate-invite')}>เปลี่ยนลิงก์เชิญ</button><p className="micro">คนเดิมกลับเข้าด้วยเบราว์เซอร์เดิมได้ · สิทธิ์และลิงก์เริ่มใหม่เมื่อเซิร์ฟเวอร์รีสตาร์ต</p></section></details>}
-        {!settings?.isOwner&&settings?.locked&&<p className="micro">ห้องนี้ล็อกไม่รับสมาชิกเพิ่ม</p>}
-        {voiceError && <p role="status" className="notice">{voiceError}</p>}
-        {roomId && joined && socketRef.current ? <YoutubeBot socket={socketRef.current} roomId={roomId} sidebarRequest={sidebarRequest} /> : <div className="waiting-panel">กำลังเชื่อมต่อห้องฟังเพลง…</div>}
-        {((isScreenSharing && screenStream) || remoteScreenStream) && <section className="screen-panel"><span className="eyebrow">{isScreenSharing ? 'YOUR SCREEN' : 'LIVE SCREEN'}</span><video autoPlay playsInline muted={isScreenSharing} ref={video=>{if(video) video.srcObject=isScreenSharing?screenStream:remoteScreenStream;}} /></section>}
-        <section className="people-panel" id="room-people"><div className="people-heading"><div><span className="eyebrow">THE GOOD COMPANY</span><h2>เพื่อนในห้อง <span className="count">{Object.keys(members).length || 1}</span></h2></div><div className="voice-controls"><button className="btn ghost" disabled={!myStream || micBusy} onClick={toggleNoiseSuppression}>ลดเสียงรบกวน: {noiseSuppression?'เปิด':'ปิด'}</button><button className="btn ghost" disabled={!userId} onClick={toggleScreenShare}>{isScreenSharing?'หยุดแชร์จอ':'แชร์หน้าจอ'}</button></div></div>
-        <div className="people-list"><div className={`person-card own ${profile.status?.trim() ? '' : 'no-status'}`}><button className="own-profile" aria-label="แก้ไขโปรไฟล์และ status" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} speaking={activeSpeakers.has(ownId) && !isMuted} motion={profile.motion} /><strong>{profile.name}</strong>{settings?.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{profile.status || ''}</span></button><div className="own-card-actions"><button className={`mic-button ${isMuted ? 'muted-mic' : ''}`} disabled={!myStream || forcedMuted || micBusy} onClick={toggleMute} aria-pressed={isMuted} aria-label={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'} title={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}><i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`} aria-hidden="true" />{forcedMuted ? 'เจ้าของปิดไมค์' : !myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}</button><button className={`mic-button ${isDeafened ? 'muted-mic' : ''}`} onClick={()=>setIsDeafened(previous=>!previous)} aria-pressed={isDeafened} aria-label={isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'} title={isDeafened ? 'เปิดเสียงไมค์เพื่อนทุกคน' : 'ปิดเสียงไมค์เพื่อนทุกคน (ยังฟังเพลงได้)'}><i className={`fas ${isDeafened ? 'fa-volume-xmark' : 'fa-headphones'}`} aria-hidden="true" />{isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'}</button><button className="text-link" onClick={()=>setEditing(true)}>แก้ไขโปรไฟล์</button></div></div>
-        {Object.entries(members).filter(([id])=>id!==ownId && id!==socketRef.current?.id).map(([id,member])=>{const peer=peers.find(p=>p.userId===id);return <div className={`person-card ${member.status?.trim() ? '' : 'no-status'}`} key={id}><Avatar avatar={member.avatar} speaking={activeSpeakers.has(id)} motion={member.motion} /><strong>{member.name}</strong>{member.isOwner&&<small className="owner-badge">เจ้าของห้อง</small>}<span className="person-status">{member.status || ''}</span><label className="peer-volume">เสียงที่คุณได้ยิน <span>{Math.round((volumes[id]??1)*100)}%</span><input aria-label={`ระดับเสียง ${member.name}`} type="range" min="0" max="1" step="0.05" value={volumes[id]??1} disabled={!peer} onChange={e=>setVolumes(previous=>({...previous,[id]:Number(e.target.value)}))}/></label>{member.forcedMuted&&<small className="moderated-label">เจ้าของปิดไมค์</small>}{settings?.isOwner&&!member.isOwner&&<div className="member-tools"><button className="btn secondary" onClick={()=>manage('mute',{userId:id,enabled:!member.forcedMuted})}>{member.forcedMuted?'อนุญาตเปิดไมค์':'ปิดไมค์'}</button><button className="btn ghost" onClick={()=>{if(window.confirm(`นำ ${member.name} ออกจากห้อง?`))manage('kick',{userId:id});}}>นำออก</button></div>}{peer && <><audio autoPlay playsInline muted={isDeafened || Boolean(member.forcedMuted)} ref={audio=>{if(audio){if(audio.srcObject!==peer.stream)audio.srcObject=peer.stream;audio.volume=volumes[id]??1;audio.muted=isDeafened || Boolean(member.forcedMuted);}}} /><div className="visualizer-hidden"><AudioVisualizer stream={peer.stream} isMuted={Boolean(member.forcedMuted)} onSpeaking={speaking=>handleSpeaking(id,speaking)} /></div></>}</div>;})}</div>
+    const peoplePanel=(
+        <section className="people-panel" id="room-people"><div className="people-heading"><div><span className="eyebrow">เพื่อนในห้อง</span><h2>เพื่อนในห้อง <span className="count">{Object.keys(members).length || 1}</span></h2></div><div className="voice-controls"><button className="btn ghost" disabled={!myStream || micBusy} onClick={toggleNoiseSuppression}>ลดเสียงรบกวน: {noiseSuppression?'เปิด':'ปิด'}</button><button className="btn ghost" disabled={!userId} onClick={toggleScreenShare}>{isScreenSharing?'หยุดแชร์จอ':'แชร์หน้าจอ'}</button></div></div>
+        <div className="people-list"><div className={`person-card own ${profile.status?.trim() ? '' : 'no-status'}`}><button className="own-profile" aria-label="แก้ไขโปรไฟล์และ status" onClick={()=>setEditing(true)}><Avatar avatar={profile.avatar} speaking={activeSpeakers.has(ownId) && !isMuted} motion={true} /><strong className="person-name">{profile.name}{settings?.isOwner&&<span className="owner-crown" role="img" aria-label="เจ้าของห้อง" title="เจ้าของห้อง"><i className="fas fa-crown" aria-hidden="true"/></span>}</strong>{profile.status?.trim()&&<span className="person-status">{profile.status}</span>}</button><div className="own-card-actions"><button className={`mic-button ${isMuted ? 'muted-mic' : ''}`} disabled={!myStream || forcedMuted || micBusy} onClick={toggleMute} aria-pressed={isMuted} aria-label={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'} title={forcedMuted?'เจ้าของปิดไมค์':!myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}><i className={`fas ${isMuted ? 'fa-microphone-slash' : 'fa-microphone'}`} aria-hidden="true" />{forcedMuted ? 'เจ้าของปิดไมค์' : !myStream ? 'ไมค์ไม่พร้อม' : isMuted ? 'เปิดไมค์' : 'ปิดไมค์'}</button><button className={`mic-button ${isDeafened ? 'muted-mic' : ''}`} onClick={()=>setIsDeafened(previous=>!previous)} aria-pressed={isDeafened} aria-label={isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'} title={isDeafened ? 'เปิดเสียงไมค์เพื่อนทุกคน' : 'ปิดเสียงไมค์เพื่อนทุกคน (ยังฟังเพลงได้)'}><i className={`fas ${isDeafened ? 'fa-volume-xmark' : 'fa-headphones'}`} aria-hidden="true" />{isDeafened ? 'เปิดเสียงเพื่อน' : 'ปิดเสียงเพื่อน'}</button></div></div>
+        {Object.entries(members).filter(([id])=>id!==ownId && id!==socketRef.current?.id).map(([id,member])=>{const peer=peers.find(p=>p.userId===id);return <div className={`person-card ${member.status?.trim() ? '' : 'no-status'}`} key={id}>{settings?.isOwner&&!member.isOwner&&<details className="member-menu"><summary aria-label={`จัดการ ${member.name}`}>···</summary><div><button disabled={member.online===false} onClick={e=>{e.currentTarget.closest('details')?.removeAttribute('open');if(window.confirm(`โอนเจ้าของห้องให้ ${member.name}?`))manage('transfer',{userId:id});}}>โอนเจ้าของห้อง</button><button onClick={()=>{if(window.confirm(`นำ ${member.name} ออกจากห้อง?`))manage('kick',{userId:id});}}>เตะออกจากห้อง</button></div></details>}<Avatar avatar={member.avatar} speaking={activeSpeakers.has(id)} motion={true} /><strong className="person-name">{member.name}{member.isOwner&&<span className="owner-crown" role="img" aria-label="เจ้าของห้อง" title="เจ้าของห้อง"><i className="fas fa-crown" aria-hidden="true"/></span>}</strong><span className="person-status">{member.online===false?`ออฟไลน์ · รอกลับ ${Math.max(0,Math.ceil(((member.offlineUntil||clock)-clock)/1000))} วินาที`:member.status || ''}</span>{settings?.isOwner&&!member.isOwner&&<button className="mic-button peer-mute" disabled={member.online===false} onClick={()=>manage('mute',{userId:id,enabled:!member.forcedMuted})}>{member.forcedMuted?'อนุญาตเปิดไมค์':'ปิดไมค์'}</button>}<label className="peer-volume">เสียงที่คุณได้ยิน <span>{Math.round((volumes[id]??1)*100)}%</span><input aria-label={`ระดับเสียง ${member.name}`} type="range" min="0" max="1" step="0.05" value={volumes[id]??1} disabled={!peer} onChange={e=>setVolumes(previous=>({...previous,[id]:Number(e.target.value)}))}/></label>{member.forcedMuted&&<small className="moderated-label">เจ้าของปิดไมค์</small>}{peer && <><audio autoPlay playsInline muted={isDeafened || Boolean(member.forcedMuted)} ref={audio=>{if(audio){if(audio.srcObject!==peer.stream)audio.srcObject=peer.stream;audio.volume=volumes[id]??1;audio.muted=isDeafened || Boolean(member.forcedMuted);}}} /><div className="visualizer-hidden"><AudioVisualizer stream={peer.stream} isMuted={Boolean(member.forcedMuted)} onSpeaking={speaking=>handleSpeaking(id,speaking)} /></div></>}</div>;})}</div>
         {myStream && <div className="visualizer-hidden"><AudioVisualizer stream={myStream} isMuted={isMuted} onSpeaking={speaking=>handleSpeaking(ownId,speaking)} /></div>}
-        </section><footer className="room-footer">mellow / A LITTLE CLOSER, ONE SONG AT A TIME <span>ฟังด้วยกัน ใกล้กันอีกนิด</span></footer></main>
+        </section>);
+    return <div className="room-shell">
+        <header className="room-header"><a className="wordmark" href="#/" onClick={e=>{e.preventDefault();leaveRoom();}}>mellow<span>●</span></a><div className="room-heading"><strong>ห้องของพวกเรา</strong><small>รหัส {roomId}</small></div><span className="connection"><i className={`status-dot ${socketConnected?'on':''}`}/>{socketConnected?'เชื่อมต่อแล้ว':'กำลังเชื่อมต่อ…'}</span>
+        <div className="header-actions"><button className="btn secondary" disabled={!settings?.invite} onClick={copyRoomId}>{copied?'✓ คัดลอกแล้ว':'เชิญเพื่อน'}</button><RoomSettings settings={settings} roomId={roomId} manage={manage} notifications={notifications} setNotifications={setNotifications}/><button className="btn ghost" onClick={leaveRoom}>ออกห้อง</button></div></header>
+        <main className="room-main">
+        {voiceError&&<p role="status" className="notice">{voiceError}</p>}
+        {roomId&&joined&&socketRef.current?<YoutubeBot socket={socketRef.current} roomId={roomId} memberId={memberId} sidebarRequest={sidebarRequest} peoplePanel={peoplePanel} screenStream={isScreenSharing?screenStream:remoteScreenStream} ownSharing={isScreenSharing} onShare={toggleScreenShare} remoteScreens={remoteScreens} screenStatus={screenStatus} onScreenRetry={()=>screenReceiverRef.current?.retry()}/>:<div className="waiting-panel">กำลังเชื่อมต่อห้อง…</div>}
+        </main>
         <nav className="mobile-room-nav" aria-label="ทางลัดในห้อง"><button onClick={()=>document.getElementById('room-player')?.scrollIntoView({behavior:'smooth',block:'start'})}>♫ เพลง</button><button onClick={()=>{setSidebarRequest({tab:'queue',id:Date.now()});document.getElementById('room-sidebar')?.scrollIntoView({behavior:'smooth',block:'start'});}}>≋ คิว</button><button onClick={()=>{setSidebarRequest({tab:'chat',id:Date.now()});document.getElementById('room-sidebar')?.scrollIntoView({behavior:'smooth',block:'start'});}}>☏ แชต</button><button onClick={()=>document.getElementById('room-people')?.scrollIntoView({behavior:'smooth',block:'start'})}>◉ เพื่อน</button></nav>
         {editing && <div className="modal-backdrop" onClick={()=>setEditing(false)}><section className="profile-modal" role="dialog" aria-modal="true" aria-labelledby="profile-title" onClick={e=>e.stopPropagation()}><span className="eyebrow">MAKE IT YOURS</span><h2 id="profile-title">ตัวคุณในห้องนี้</h2><ProfileForm initial={profile} label="บันทึกตัวแทน" onCancel={()=>setEditing(false)} onSave={next=>{setProfile(next); socketRef.current?.emit('profile-update',next); setEditing(false);}} /></section></div>}
     </div>;

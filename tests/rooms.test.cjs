@@ -18,6 +18,7 @@ test('owner rights, invite-only, locks, forced mute, kick and owner reconnect',{
  const created=await(await fetch(`${origin}/api/rooms`,{method:'POST'})).json();assert.equal(created.roomId.length,8);assert.equal(created.invite.length,12);
  const owner=await open(),guest=await open(),newcomer=await open();
  let result=await join(owner,created.roomId,'owner-peer',{memberToken:created.memberToken});assert.equal(result.settings.isOwner,true);
+ assert.equal(result.settings.inviteOnly,false);await manage(owner,'invite-only',{enabled:true});
  assert.ok((await join(guest,created.roomId,'guest-peer',{})).error);
  const guestJoin=await join(guest,created.roomId,'guest-peer',{invite:created.invite});assert.equal(guestJoin.settings.isOwner,false);
  assert.ok((await manage(guest,'lock',{enabled:true})).error);

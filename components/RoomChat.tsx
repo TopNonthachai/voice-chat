@@ -1,18 +1,23 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Socket } from 'socket.io-client';
 import { Avatar } from './Profile';
+import {notifyRoom} from './room-notifications';
+import reactionOptions from '../reaction-options.json';
+type MessageReaction={emoji:string;users:{id:string;name:string}[]};
 interface Message {
-    id: string; sequence: number; clientId: string; senderId: string; senderSocketId: string;
-    name: string; avatar: string; text: string; timestamp: number;
+    id: string; sequence: number; clientId: string; senderId: string; senderSocketId: string; senderMemberId?:string;
+    name: string; avatar: string; text: string; timestamp: number; reactions?:MessageReaction[];reactionRevision?:number;
     attachment?: {id: string; name: string; size: number; image: boolean; expiresAt: number; expired?: boolean};
 }
 const sizeLabel = (size: number) => size < 1024*1024 ? `${Math.ceil(size/1024)} KB` : `${(size/1024/1024).toFixed(1)} MB`;
-export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket|null;roomId:string;active:boolean;onUnread:React.Dispatch<React.SetStateAction<number>>}) {
+export default function RoomChat({socket,roomId,active,onUnread,memberId}: {socket:Socket|null;roomId:string;memberId?:string;active:boolean;onUnread:React.Dispatch<React.SetStateAction<number>>}) {
     const [messages,setMessages]=useState<Message[]>([]);
     const [text,setText]=useState('');
     const [file,setFile]=useState<File|null>(null);
     const [pending,setPending]=useState(false);
     const [error,setError]=useState('');
+    const [reactionPending,setReactionPending]=useState<Record<string,boolean>>({});
+    const reactionBusy=useRef(new Set<string>());
     const [clock,setClock]=useState(Date.now());
     const input=useRef<HTMLInputElement>(null);
     const list=useRef<HTMLDivElement>(null);
@@ -23,9 +28,24 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
     const controller=useRef<AbortController|null>(null);
     const merge=(incoming:Message[])=>setMessages(previous=>{
         const map=new Map(previous.map(message=>[message.id,message]));
-        incoming.forEach(message=>map.set(message.id,message));
+        incoming.forEach(message=>{
+            const old=map.get(message.id);
+            map.set(message.id,old&&(old.reactionRevision||0)>(message.reactionRevision||0)?{...message,reactions:old.reactions,reactionRevision:old.reactionRevision}:message);
+        });
         return [...map.values()].sort((a,b)=>a.sequence-b.sequence).slice(-100);
     });
+    const updateReactions=({messageId,reactions,revision}:{messageId:string;reactions:MessageReaction[];revision:number})=>setMessages(previous=>previous.map(message=>message.id===messageId&&revision>=(message.reactionRevision||0)?{...message,reactions,reactionRevision:revision}:message));
+    const react=(message:Message,emoji:string)=>{
+        if(!socket?.connected){setError('กำลังเชื่อมต่อห้อง…');return;}
+        const key=`${message.id}:${emoji}`;if(reactionBusy.current.has(key))return;
+        reactionBusy.current.add(key);setReactionPending(previous=>({...previous,[key]:true}));setError('');
+        const enabled=!message.reactions?.find(group=>group.emoji===emoji)?.users.some(user=>user.id===memberId);
+        socket.timeout(5000).emit('chat-react',{roomId,messageId:message.id,emoji,enabled},(timeout:Error|null,result:{error?:string;reactions:MessageReaction[];revision:number})=>{
+            reactionBusy.current.delete(key);setReactionPending(previous=>({...previous,[key]:false}));
+            if(timeout||result?.error)setError(result?.error||'ยังไม่ได้รับคำตอบ ตรวจรีแอ็กชันก่อนลองใหม่');
+            else updateReactions({messageId:message.id,reactions:result.reactions,revision:result.revision});
+        });
+    };
     useEffect(()=>{
         if(!socket)return;
         const history=(items:Message[])=>{items.forEach(item=>seen.current.add(item.id));merge(items);};
@@ -34,15 +54,15 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
             seen.current.add(message.id);
             if(seen.current.size>300)seen.current.delete(seen.current.values().next().value!);
             merge([message]);
-            if(!activeRef.current&&message.senderSocketId!==socket.id)onUnread(n=>n+1);
+            if(message.senderSocketId!==socket.id&&(!memberId||message.senderMemberId!==memberId)){notifyRoom('chat');if(!activeRef.current)onUnread(n=>n+1);}
         };
         const expire=({id}:{id:string})=>setMessages(previous=>previous.map(message=>message.attachment?.id===id?{...message,attachment:{...message.attachment,expired:true}}:message));
         const sync=()=>socket.emit('chat-sync',{roomId});
-        socket.on('chat-file-expired',expire);
+        socket.on('chat-file-expired',expire);socket.on('chat-reactions',updateReactions);
         const tick=setInterval(()=>setClock(Date.now()),30000);
         socket.on('chat-history',history);socket.on('chat-message',receive);socket.on('connect',sync);sync();
-        return ()=>{clearInterval(tick);socket.off('chat-file-expired',expire);socket.off('chat-history',history);socket.off('chat-message',receive);socket.off('connect',sync);controller.current?.abort();};
-    },[socket,roomId,onUnread]);
+        return ()=>{clearInterval(tick);socket.off('chat-file-expired',expire);socket.off('chat-reactions',updateReactions);socket.off('chat-history',history);socket.off('chat-message',receive);socket.off('connect',sync);controller.current?.abort();};
+    },[socket,roomId,onUnread,memberId]);
     useEffect(()=>{if(active){onUnread(0);follow.current=true;if(list.current)list.current.scrollTop=list.current.scrollHeight;}},[active,onUnread]);
     useEffect(()=>{if(active&&follow.current&&list.current)list.current.scrollTop=list.current.scrollHeight;},[messages,active]);
     const attachmentUrl=(id:string,preview=false)=>`/api/chat/files/${encodeURIComponent(id)}?${new URLSearchParams({roomId,clientId:socket?.id||'',...(preview?{preview:'1'}:{})})}`;
@@ -71,10 +91,15 @@ export default function RoomChat({socket,roomId,active,onUnread}: {socket:Socket
     return <div className="chat-panel">
         <div className="chat-messages" ref={list} role="log" aria-label="ข้อความในห้อง" aria-live={active?'polite':'off'} aria-relevant="additions" onScroll={()=>{if(list.current)follow.current=list.current.scrollHeight-list.current.scrollTop-list.current.clientHeight<80;}}>
             {!messages.length&&<div className="empty-chat"><span>☏</span><h3>ทักเพื่อนสักหน่อย</h3><p>คุยเรื่องเพลง ส่งรูป หรือแชร์ไฟล์กันได้ที่นี่</p></div>}
-            {messages.map(message=><article className={`chat-message ${message.senderSocketId===socket?.id?'mine':''}`} key={message.id}>
-                <Avatar avatar={message.avatar}/><div className="chat-message-body"><header><strong>{message.name}</strong><time dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})}</time></header>
+            {messages.map(message=><article className={`chat-message ${(message.senderSocketId===socket?.id||(memberId&&message.senderMemberId===memberId))?'mine':''}`} key={message.id}>
+                <Avatar avatar={message.avatar}/><div className="chat-message-body"><header><strong>{message.name}</strong><time dateTime={new Date(message.timestamp).toISOString()}>{new Date(message.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})}</time><details className="message-reaction-picker"><summary aria-label="เพิ่มรีแอ็กชันข้อความ">☺＋</summary><div>{reactionOptions.map(option=><button type="button" key={option.emoji} aria-label={option.label} title={option.label} disabled={reactionPending[`${message.id}:${option.emoji}`]} onClick={e=>{react(message,option.emoji);e.currentTarget.closest('details')?.removeAttribute('open');}}>{option.emoji}</button>)}</div></details></header>
                 {message.text&&<p>{message.text}</p>}
                 {message.attachment&&<div className="chat-attachment">{message.attachment.expired||message.attachment.expiresAt<=clock ? <div className="expired-attachment"><strong>{message.attachment.name}</strong><span>ไฟล์หมดอายุแล้ว</span></div> : <>{message.attachment.image&&<img src={attachmentUrl(message.attachment.id,true)} alt={message.attachment.name} loading="lazy" onError={e=>{e.currentTarget.style.display='none';}}/>}<a href={attachmentUrl(message.attachment.id)} download={message.attachment.name}><span>↧</span><span><strong>{message.attachment.name}</strong><small>{sizeLabel(message.attachment.size)} · ดาวน์โหลด</small></span></a><small className="file-expiry">หมดอายุ {new Date(message.attachment.expiresAt).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})}</small></>}</div>}
+                {!!message.reactions?.length&&<div className="message-reactions" role="group" aria-label="รีแอ็กชันข้อความ">
+                    {message.reactions?.map(group=><button type="button" className="message-reaction" key={group.emoji} aria-pressed={group.users.some(user=>user.id===memberId)} title={group.users.map(user=>user.name).join(', ')} aria-label={`${group.emoji} ${group.users.length} คน: ${group.users.map(user=>user.name).join(', ')}`} disabled={reactionPending[`${message.id}:${group.emoji}`]} onClick={()=>react(message,group.emoji)}>{group.emoji} <span>{group.users.length}</span></button>)}
+
+                {!!message.reactions?.length&&<details className="reaction-people"><summary aria-label="รายชื่อคนที่ส่งรีแอ็กชัน" title="รายชื่อคนที่ส่งรีแอ็กชัน"><i className="fas fa-user-group" aria-hidden="true"/></summary><div>{message.reactions.map(group=><p key={group.emoji}>{group.emoji} {group.users.map(user=>user.name).join(', ')}</p>)}</div></details>}
+                </div>}
                 </div>
             </article>)}
         </div>

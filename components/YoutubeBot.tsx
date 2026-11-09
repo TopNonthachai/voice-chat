@@ -2,19 +2,25 @@ import React, { useEffect, useRef, useState } from 'react';
 import YouTubeEmbed from './YouTubeEmbed';
 import {YouTubeHandle} from './youtube-api';
 import RoomChat from './RoomChat';
+import LiveReactions from './LiveReactions';
+import SharedBoard from './SharedBoard';
+import RandomBox from './RandomBox';
 import PlaylistTools from './PlaylistTools';
+import {Avatar} from './Profile';
 import { Socket } from 'socket.io-client';
 interface Track { id: string; videoId: string; title: string; author?: string }
-interface Activity { id: string; timestamp: number; actor: string; action: string; message: string; title: string; position?: number }
+interface Activity { id: string; timestamp: number; actor: string; action: string; message: string; title: string; avatar?:string; videoId?:string; position?: number }
 interface MusicState {
     queue: Track[]; currentId: string | null; playing: boolean; position: number;
-    updatedAt: number; revision: number; generation: number; shuffle: boolean; repeat: boolean; finished: boolean; activity: Activity[];
+    updatedAt: number; revision: number; generation: number; shuffle: boolean; played?:string[]; repeat: boolean; finished: boolean; activity: Activity[];
 }
 const time = (s: number) => `${Math.floor(Math.max(0, s || 0) / 60)}:${String(Math.floor(Math.max(0, s || 0) % 60)).padStart(2, '0')}`;
-export default function YoutubeBot({ socket, roomId, sidebarRequest }: { socket: Socket | null; roomId: string; sidebarRequest?: {tab:'queue'|'chat';id:number} }) {
+export default function YoutubeBot({ socket, roomId, sidebarRequest, peoplePanel, screenStream, ownSharing, onShare, memberId, remoteScreens, screenStatus, onScreenRetry }: { socket: Socket | null; roomId: string; sidebarRequest?: {tab:'queue'|'chat';id:number}; peoplePanel:React.ReactNode;screenStream:MediaStream|null;ownSharing:boolean;onShare:()=>void;memberId:string;remoteScreens:{id:string;name:string}[];screenStatus:string;onScreenRetry:()=>void }) {
     const [state, setState] = useState<MusicState | null>(null);
     const [input, setInput] = useState('');
-    const [activeTab, setActiveTab] = useState<'queue' | 'chat' | 'log'>('queue');
+    const [videoTab,setVideoTab]=useState<'youtube'|'screen'|'board'|'random'>('youtube');
+    const [historySearch,setHistorySearch]=useState('');
+    const [activeTab, setActiveTab] = useState<'queue' | 'chat' | 'log'>('chat');
     const [connected, setConnected] = useState(Boolean(socket?.connected));
     const [syncStatus, setSyncStatus] = useState('กำลังรับสถานะห้อง…');
     const [syncing, setSyncing] = useState(false);
@@ -126,7 +132,14 @@ export default function YoutubeBot({ socket, roomId, sidebarRequest }: { socket:
     };
     const commitSeek = () => {if (seek !== null) {setNativeControls(false);command('seek', {position:seek}); setSeek(null);}};
     return <section className="listening-layout">
-        <div className="player-panel" id="room-player"><div className="panel-top"><div><span className="eyebrow">THE LISTENING ROOM</span><h2>เพลงนี้ มีเราอยู่ด้วยกัน</h2></div><span className="live-pill"><i /> LIVE ROOM</span></div>
+        <div className="room-left"><div className="player-panel" id="room-player">
+        <div className="video-header"><div className="video-tabs" role="tablist" aria-label="กิจกรรมในห้อง" onKeyDown={e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tabs=['youtube','screen','board','random'] as const,index=tabs.indexOf(videoTab),next=tabs[e.key==='Home'?0:e.key==='End'?3:(index+(e.key==='ArrowRight'?1:3))%4];setVideoTab(next);document.getElementById(`video-${next}-tab`)?.focus();}}}>
+            <button id="video-youtube-tab" role="tab" aria-selected={videoTab==='youtube'} aria-controls="video-youtube-panel" tabIndex={videoTab==='youtube'?0:-1} onClick={()=>setVideoTab('youtube')}>YouTube {state?.playing&&<span className="live-indicator">● กำลังเล่น</span>}</button>
+            <button id="video-screen-tab" role="tab" aria-selected={videoTab==='screen'} aria-controls="video-screen-panel" tabIndex={videoTab==='screen'?0:-1} onClick={()=>setVideoTab('screen')}>จอเพื่อน {(ownSharing||remoteScreens.length>0)&&<span className="live-indicator">● LIVE</span>}</button>
+            <button id="video-board-tab" role="tab" aria-selected={videoTab==='board'} aria-controls="video-board-panel" tabIndex={videoTab==='board'?0:-1} onClick={()=>setVideoTab('board')}>กระดาน</button>
+            <button id="video-random-tab" role="tab" aria-selected={videoTab==='random'} aria-controls="video-random-panel" tabIndex={videoTab==='random'?0:-1} onClick={()=>setVideoTab('random')}>กล่องสุ่ม</button>
+        </div><button className={`btn ${enabled?'secondary':'primary'} join-listening`} disabled={!current||!ready} onClick={toggleListening} aria-pressed={enabled}>{enabled?'ออกจากการฟัง':'เข้าร่วม'}</button></div>
+        <div id="video-youtube-panel" role="tabpanel" aria-labelledby="video-youtube-tab" hidden={videoTab!=='youtube'}>
         <div className="sync-toolbar"><span role="status"><i className={`status-dot ${connected?'on':''}`}/>{connected?syncStatus:'ขาดการเชื่อมต่อ กำลังเชื่อมต่อใหม่…'}</span><button className="btn secondary" disabled={syncing} onClick={resync}>{syncing?'กำลังซิงก์…':'↻ ซิงก์ใหม่'}</button></div>
         <div className="video-stage">
             {current ? <><div className={`video-media ${nativeControls?'native-interaction':''}`} inert={!nativeControls}>
@@ -144,17 +157,23 @@ export default function YoutubeBot({ socket, roomId, sidebarRequest }: { socket:
         <div className="now-playing"><div><span className="eyebrow">{state?.playing ? 'NOW PLAYING' : 'TAKE A BREATHER'}</span><h3>{current ? current.title : 'รอเพลงโปรดของคุณ'}</h3></div><span className="play-status">{!ready&&current?'กำลังเตรียมตัวเล่น…':!enabled?'ยังไม่ได้เข้าฟัง':!state?.playing?'ห้องหยุดเพลง':localPlaying?'ตัวเล่นกำลังเล่นบนเครื่องนี้':'ห้องกำลังเล่น · เครื่องคุณยังไม่เริ่ม'}</span></div>
         <div className="timeline"><input aria-label="เลื่อนเวลาให้ทุกคน" type="range" min="0" max={duration || 1} step="0.5" disabled={!enabled || !ready || !duration} value={seek ?? Math.min(position, duration || 0)}
             onChange={e => setSeek(Number(e.target.value))} onPointerUp={commitSeek} onKeyUp={commitSeek} onBlur={commitSeek} /><div><span>{time(seek ?? position)}</span><span>{time(duration)}</span></div></div>
-        <div className="transport"><div className="transport-main"><button className="round-btn play" disabled={!current || !connected} onClick={sharedPlayback} aria-label={state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>{state?.playing ? 'Ⅱ' : '▶'}</button><button className="round-btn" disabled={!current} onClick={() => command('next')} aria-label="เพลงถัดไป">↠</button><div className="transport-caption"><strong>{state?.playing ? 'Pause all' : 'Play all'}</strong><span>ควบคุมพร้อมกันทั้งห้อง</span></div></div><label className="volume">♫<input aria-label="ระดับเสียงของคุณ" type="range" min="0" max="1" step="0.05" value={volume} onChange={e => setVolume(Number(e.target.value))} /></label></div>
+        <div className="transport"><div className="transport-main"><button className="round-btn play" disabled={!current || !connected} onClick={sharedPlayback} aria-label={state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}>{state?.playing ? 'Ⅱ' : '▶'}</button><button className="round-btn" disabled={!current} onClick={() => command('next')} aria-label="เพลงถัดไป">↠</button><div className="transport-caption"><strong>{state?.playing ? 'หยุดให้ทุกคน' : 'เล่นให้ทุกคน'}</strong><span>ควบคุมพร้อมกันทั้งห้อง</span></div></div><label className="volume">♫<input aria-label="ระดับเสียงของคุณ" type="range" min="0" max="1" step="0.05" value={volume} onChange={e => setVolume(Number(e.target.value))} /></label></div>
         {current&&<div className="audio-unlock"><button className="btn secondary" disabled={!ready} onClick={()=>{enabledRef.current=true;setEnabled(true);startLocal(Boolean(latest.current?.playing));}}>♪ เปิดเสียงบนเครื่องนี้</button><button className="text-link" onClick={()=>setNativeControls(value=>!value)}>{nativeControls?'ใช้ปุ่มควบคุมของห้อง':'แสดงปุ่ม YouTube'}</button><p className="micro">หากยังเงียบ ให้แตะ ▶ / เปิดเสียงในวิดีโอ และเช็กระดับเสียงเครื่อง</p></div>}
         {audioHint&&<p role="status" className="notice">{audioHint}</p>}
-        <div className="listening-bar"><div><span className={`status-dot ${enabled ? 'on' : ''}`} /><span>{enabled ? 'คุณอยู่ในห้องฟังเพลง' : 'เข้าฟังเมื่อคุณพร้อม'}</span></div><button className={`btn ${enabled ? 'secondary' : 'primary'}`} disabled={Boolean(current)&&!ready} onClick={toggleListening}>{enabled ? 'ออกจากการฟัง' : 'เข้าฟัง YouTube'} {enabled ? '↗' : '♫'}</button></div>
         {error && <p role="alert" className="notice">{error}</p>}
         </div>
-        <aside className="queue-panel" id="room-sidebar"><div className="panel-top"><div><span className="eyebrow">PICK THE NEXT VIBE</span><h2>คิวของพวกเรา <span className="count">{state?.queue.length || 0}</span></h2></div><span className="queue-symbol">≋</span></div>
-        <div className="queue-tabs" role="tablist" aria-label="คิวเพลงและประวัติ" onKeyDown={e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tabs=['queue','chat','log'] as const;const index=tabs.indexOf(activeTab);const next=tabs[e.key==='Home'?0:e.key==='End'?2:(index+(e.key==='ArrowRight'?1:2))%3];setActiveTab(next);document.getElementById(`music-${next}-tab`)?.focus();}}}>
-            <button id="music-queue-tab" role="tab" aria-selected={activeTab==='queue'} aria-controls="music-queue-panel" tabIndex={activeTab==='queue'?0:-1} onClick={()=>setActiveTab('queue')}>♫ คิวเพลง</button>
-            <button id="music-chat-tab" role="tab" aria-selected={activeTab==='chat'} aria-controls="music-chat-panel" tabIndex={activeTab==='chat'?0:-1} onClick={()=>setActiveTab('chat')}>☏ แชต {unread>0&&<span className="unread-badge">{unread>99?'99+':unread}</span>}</button>
-            <button id="music-log-tab" role="tab" aria-selected={activeTab==='log'} aria-controls="music-log-panel" tabIndex={activeTab==='log'?0:-1} onClick={()=>setActiveTab('log')}>◷ ประวัติ <span>{state?.activity?.length || 0}</span></button>
+        <div id="video-screen-panel" role="tabpanel" aria-labelledby="video-screen-tab" hidden={videoTab!=='screen'} className="screen-view">
+            {screenStream?<video autoPlay playsInline muted={true} ref={video=>{if(video&&video.srcObject!==screenStream)video.srcObject=screenStream;}}/>:<div className="empty-screen"><span>▣</span><h3>{remoteScreens.length?`${remoteScreens[0].name} กำลังแชร์หน้าจอ`:'ยังไม่มีใครแชร์หน้าจอ'}</h3><p>{remoteScreens.length?(screenStatus==='error'?'รับภาพไม่ได้ ลองเชื่อมต่อจออีกครั้ง':'กำลังเชื่อมต่อเพื่อรับภาพ…'):'แชร์สิ่งที่กำลังทำให้เพื่อนดูได้ที่นี่'}</p>{remoteScreens.length>0&&<button className="btn secondary" onClick={onScreenRetry}>เชื่อมต่อจอใหม่</button>}</div>}
+            <div className="screen-toolbar"><small>{screenStream?(ownSharing?'คุณกำลังแชร์หน้าจอ':'กำลังดูหน้าจอเพื่อน'):'เสียง YouTube จะเล่นต่อเมื่อสลับแท็บ'}</small><button className="btn secondary" onClick={onShare}>{ownSharing?'หยุดแชร์จอ':'แชร์จอของฉัน'}</button></div>
+        </div>
+        <div id="video-board-panel" role="tabpanel" aria-labelledby="video-board-tab" hidden={videoTab!=='board'}><SharedBoard socket={socket} roomId={roomId} memberId={memberId}/></div>
+        <div id="video-random-panel" role="tabpanel" aria-labelledby="video-random-tab" hidden={videoTab!=='random'}><RandomBox socket={socket} roomId={roomId}/></div>
+        <LiveReactions socket={socket} roomId={roomId}/>
+        </div></div>
+        <aside className="queue-panel" id="room-sidebar">        <div className="queue-tabs" role="tablist" aria-label="คิวเพลงและประวัติ" onKeyDown={e=>{if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();const tabs=['chat','queue','log'] as const;const index=tabs.indexOf(activeTab);const next=tabs[e.key==='Home'?0:e.key==='End'?2:(index+(e.key==='ArrowRight'?1:2))%3];setActiveTab(next);document.getElementById(`music-${next}-tab`)?.focus();}}}>
+            <button id="music-chat-tab" role="tab" aria-selected={activeTab==='chat'} aria-controls="music-chat-panel" tabIndex={activeTab==='chat'?0:-1} onClick={()=>setActiveTab('chat')}>แชท {unread>0&&<span className="unread-badge">{unread>99?'99+':unread}</span>}</button>
+            <button id="music-queue-tab" role="tab" aria-selected={activeTab==='queue'} aria-controls="music-queue-panel" tabIndex={activeTab==='queue'?0:-1} onClick={()=>setActiveTab('queue')}>เพลงและคิว</button>
+            <button id="music-log-tab" role="tab" aria-selected={activeTab==='log'} aria-controls="music-log-panel" tabIndex={activeTab==='log'?0:-1} onClick={()=>setActiveTab('log')}>ประวัติ</button>
         </div>
         <div id="music-queue-panel" role="tabpanel" aria-labelledby="music-queue-tab" hidden={activeTab!=='queue'} className="queue-content">
         <form className="add-song" onSubmit={e => {e.preventDefault(); const value=input.trim();if(value) command('add',{url:value},()=>setInput(''));}}><label htmlFor="song-url">เพิ่มเพลงเข้าห้อง</label><div><input id="song-url" type="text" value={input} onChange={e=>setInput(e.target.value)} placeholder="วางลิงก์ YouTube ที่นี่…" /><button className="btn primary" disabled={!input.trim()} aria-label="เพิ่มเพลง">＋</button></div></form>
@@ -162,21 +181,21 @@ export default function YoutubeBot({ socket, roomId, sidebarRequest }: { socket:
             if(!socket?.connected){done('กำลังเชื่อมต่อห้อง กรุณาลองใหม่');return;}
             socket.timeout(8000).emit('music-command',{roomId,action:'import',playlist,mode},(timeout:Error|null,result:{error?:string})=>done(timeout?'ไม่ได้รับคำตอบ ตรวจคิวก่อนลองใหม่':result?.error));
         }}/>
-        <div className="queue-modes"><button className="mode-button" aria-pressed={Boolean(state?.shuffle)} onClick={()=>command('shuffle',{enabled:!state?.shuffle})}><span>⤨ สุ่มคิว</span><b>{state?.shuffle?'เปิด':'ปิด'}</b></button><button className="mode-button" aria-pressed={Boolean(state?.repeat)} onClick={()=>command('repeat',{enabled:!state?.repeat})}><span>↻ วนทั้งคิว</span><b>{state?.repeat?'เปิด':'ปิด'}</b></button></div><p className="micro">{state?.shuffle?'สุ่มไม่ซ้ำจนฟังครบทุกเพลงในรอบ':'เล่นตามลำดับในคิว'} · {state?.repeat?'ฟังครบแล้วเริ่มรอบใหม่':'ฟังครบแล้วหยุด'}</p>
+        <div className="queue-modes"><button className="mode-button" aria-pressed={Boolean(state?.shuffle)} onClick={()=>command('shuffle',{enabled:!state?.shuffle})}><span>⤨ สุ่มคิว</span><b>{state?.shuffle?'เปิด':'ปิด'}</b></button><button className="mode-button" aria-pressed={Boolean(state?.repeat)} onClick={()=>command('repeat',{enabled:!state?.repeat})}><span>↻ วนทั้งคิว</span><b>{state?.repeat?'เปิด':'ปิด'}</b></button></div><p className="micro">{state?.shuffle?'สุ่มเพลงที่ยังไม่เล่นในรอบนี้ · เพลงที่กดข้ามยังอยู่ครบ':'เล่นตามลำดับในคิว'} · {state?.repeat?'ฟังครบแล้วเริ่มรอบใหม่':'ฟังครบแล้วหยุด'}</p>
         <ol className="song-list">{state?.queue.map((item,index)=><li key={item.id} className={item.id===current?.id?'current':''}>
-            <button className="song-select" onClick={()=>command('select',{id:item.id})}><span className="song-number">{item.id===current?.id?'♫':String(index+1).padStart(2,'0')}</span><img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" /><span><strong>{item.title}</strong><small>{item.id===current?.id?'กำลังเลือกฟัง':item.author || 'YouTube · พร้อมเล่น'}</small></span></button>
+            <button className="song-select" onClick={()=>command('select',{id:item.id})}><span className="song-number">{item.id===current?.id?'♫':String(index+1).padStart(2,'0')}</span><img src={`https://i.ytimg.com/vi/${item.videoId}/default.jpg`} alt="" /><span><strong>{item.title}</strong><small>{item.id===current?.id?'กำลังเลือกฟัง':state.played?.includes(item.id)?'เล่นแล้วในรอบนี้':item.author || 'YouTube · รอเล่น'}</small></span></button>
             <div className="song-actions"><button aria-label={`ย้ายเพลง ${index+1} ขึ้น`} disabled={index===0} onClick={()=>command('move',{id:item.id,direction:-1})}>↑</button><button aria-label={`ย้ายเพลง ${index+1} ลง`} disabled={index===state.queue.length-1} onClick={()=>command('move',{id:item.id,direction:1})}>↓</button><button aria-label={`ลบเพลง ${index+1}`} onClick={()=>command('remove',{id:item.id})}>×</button></div>
         </li>)}</ol>{!state?.queue.length&&<div className="empty-queue"><span>✦</span><p>คิวว่าง แต่บรรยากาศพร้อมแล้ว</p><small>ทุกคนในห้องช่วยกันเพิ่มเพลงได้</small></div>}
         </div>
-        <div id="music-chat-panel" role="tabpanel" aria-labelledby="music-chat-tab" hidden={activeTab!=='chat'}><RoomChat socket={socket} roomId={roomId} active={activeTab==='chat'} onUnread={setUnread}/></div>
+        <div id="music-chat-panel" role="tabpanel" aria-labelledby="music-chat-tab" hidden={activeTab!=='chat'}><RoomChat socket={socket} roomId={roomId} active={activeTab==='chat'} onUnread={setUnread} memberId={memberId}/></div>
         <div id="music-log-panel" role="tabpanel" aria-labelledby="music-log-tab" hidden={activeTab!=='log'} className="activity-panel">
-            <p className="micro activity-intro">ความเคลื่อนไหวของเพลงในห้อง · ล่าสุดอยู่ด้านบน</p>
-            {state?.activity?.length ? <ol className="activity-list">{[...state.activity].reverse().map(entry=><li key={entry.id}>
-                <span className="activity-mark" aria-hidden="true">{entry.action==='add'?'＋':entry.action==='remove'?'−':entry.action==='pause'?'Ⅱ':entry.action==='play'?'▶':'♫'}</span>
-                <div><p><strong>{entry.actor}</strong> {entry.message}{entry.position!==undefined ? ` ไปที่ ${time(entry.position)}`:''}</p>{entry.title&&<span className="activity-song">{entry.title}</span>}<time dateTime={new Date(entry.timestamp).toISOString()}>{new Date(entry.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</time></div>
-            </li>)}</ol> : <div className="empty-queue"><span>◷</span><p>ยังไม่มีความเคลื่อนไหว</p><small>เมื่อมีคนจัดการเพลง ประวัติจะแสดงที่นี่</small></div>}
+            <label className="history-search">ค้นหาเพลง คน หรือการกระทำ<input value={historySearch} onChange={e=>setHistorySearch(e.target.value)} placeholder="เช่น สวัสดี"/></label>
+            <ol className="activity-list">{[...(state?.activity||[])].filter(entry=>entry.action!=='ended'&&`${entry.actor} ${entry.message} ${entry.title}`.toLocaleLowerCase().includes(historySearch.trim().toLocaleLowerCase())).reverse().map(entry=><li key={entry.id}>
+                <Avatar avatar={entry.avatar||'🌻'}/><div><p><strong>{entry.actor}</strong> {entry.message}{entry.position!==undefined?` ไปที่ ${time(entry.position)}`:''}</p>{entry.title&&<span className="activity-song">{entry.videoId&&<img src={`https://i.ytimg.com/vi/${entry.videoId}/default.jpg`} alt=""/>}{entry.title}</span>}<time dateTime={new Date(entry.timestamp).toISOString()}>{new Date(entry.timestamp).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</time></div>
+            </li>)}</ol>
+            {!(state?.activity||[]).some(entry=>entry.action!=='ended'&&`${entry.actor} ${entry.message} ${entry.title}`.toLocaleLowerCase().includes(historySearch.trim().toLocaleLowerCase()))&&<div className="empty-queue"><p>{historySearch?'ไม่พบประวัติที่ตรงกับคำค้น':'ยังไม่มีความเคลื่อนไหว'}</p></div>}
             <p className="queue-footnote">เก็บ 100 รายการล่าสุดในห้องนี้<br />ประวัติจะเริ่มใหม่เมื่อเซิร์ฟเวอร์รีสตาร์ต</p>
         </div>
-        <div className="queue-footnote" hidden={activeTab!=='queue'}>↗ เพิ่มด้วยลิงก์วิดีโอทีละเพลง<br />คิวจะเริ่มใหม่เมื่อเซิร์ฟเวอร์รีสตาร์ต</div></aside>
+        <div className="queue-footnote" hidden={activeTab!=='queue'}>↗ เพิ่มด้วยลิงก์วิดีโอทีละเพลง<br />คิวจะเริ่มใหม่เมื่อเซิร์ฟเวอร์รีสตาร์ต</div></aside>{peoplePanel}
     </section>;
 }

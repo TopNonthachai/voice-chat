@@ -23,9 +23,11 @@ const cleanProfile = (profile, name) => {
     };
 };
 const roomService=require('./room-server.cjs').createRoomService(io,app,cleanProfile);
+require('./screen-server.cjs').registerScreens(io);
+require('./reaction-server.cjs').registerReactions(io);
+require('./board-server.cjs').registerBoard(io);
+require('./random-box-server.cjs').registerRandomBox(io);
 io.on('connection',socket=>{
- socket.on('screen-start',(data={})=>{if(!data||typeof data!=='object')return;if(socket.data.roomId!==data.roomId||!socket.rooms.has(data.roomId))return;if(data.userId!==`${socket.data.userId}-screen`)return;socket.data.screenId=data.userId;socket.to(data.roomId).emit('screen-shared',{userId:data.userId});});
- socket.on('screen-stop',roomId=>{if(socket.data.roomId!==roomId)return;socket.data.screenId=null;socket.to(roomId).emit('screen-stopped');});
  socket.on('audio-change',(data={})=>{if(!data||typeof data!=='object')return;if(socket.data.roomId===data.roomId)socket.to(data.roomId).emit('audio-update',data.audioState);});
 });
 

@@ -2,8 +2,9 @@ import React, { useRef, useState } from 'react';
 export interface Profile { name: string; avatar: string; motion: boolean; status?: string }
 export const characters = ['🌻', '🐈', '🦊', '🐻', '🐸', '🐼', '🐰', '👾', '🤖', '🪐', '🍄', '👻'];
 export const readProfile = (): Profile => {
-    try { const p = JSON.parse(localStorage.getItem('mellow-profile') || 'null'); if (p?.name) return { ...p, status: typeof p.status === 'string' ? p.status : '' }; } catch {}
-    return { name: '', avatar: '🌻', motion: true, status: '' };
+    try { const p = JSON.parse(localStorage.getItem('mellow-profile') || 'null'); if (p?.name) return { ...p, motion:true, status: typeof p.status === 'string' ? p.status : '' }; } catch {}
+    const animals=['แมว','จิ้งจอก','หมี','กระต่าย','แพนด้า','นาก'];
+    return {name:`${animals[Math.floor(Math.random()*animals.length)]}สายชิล${100+Math.floor(Math.random()*900)}`,avatar:characters[Math.floor(Math.random()*characters.length)],motion:true,status:''};
 };
 export function Avatar({ avatar, speaking = false, motion = true }: { avatar: string; speaking?: boolean; motion?: boolean }) {
     return <span className={`avatar ${speaking ? 'speaking' : ''} ${speaking && motion ? 'bouncing' : ''}`}>
@@ -13,7 +14,7 @@ export function Avatar({ avatar, speaking = false, motion = true }: { avatar: st
 export default function ProfileForm({ initial = readProfile(), onSave, label = 'เข้าห้อง', onCancel }: {
     initial?: Profile; onSave: (profile: Profile) => void; label?: string; onCancel?: () => void;
 }) {
-    const [profile, setProfile] = useState(initial);
+    const [profile, setProfile] = useState(()=>({...initial,motion:true}));
     const [randomName] = useState(() => {
         const animals = ['แมว', 'จิ้งจอก', 'หมี', 'กระต่าย', 'แพนด้า', 'นาก', 'เพนกวิน', 'กบ'];
         const moods = ['สายชิล', 'ฟังเพลง', 'อารมณ์ดี', 'ขี้เซา', 'นักเต้น', 'ยิ้มเก่ง'];
@@ -58,9 +59,9 @@ export default function ProfileForm({ initial = readProfile(), onSave, label = '
             {characters.map(avatar => <button type="button" key={avatar} aria-label={`ตัวละคร ${avatar}`} aria-pressed={avatar === profile.avatar} onClick={() => setProfile({ ...profile, avatar })}>{avatar}</button>)}
         </div>
         <div className="profile-actions"><button type="button" className="btn secondary" disabled={loading} onClick={() => input.current?.click()}>{loading ? 'กำลังเตรียมรูป…' : '↥ ใช้รูปของฉัน'}</button>
-            <button type="button" className="btn ghost" onClick={() => setProfile({ ...profile, avatar: characters[Math.floor(Math.random() * characters.length)] })}>✦ สุ่มตัวละคร</button></div>
+            </div>
         <input ref={input} className="sr-only" type="file" accept="image/png,image/jpeg,image/webp" aria-label="อัปโหลดรูปตัวแทน" onChange={e => upload(e.target.files?.[0])} />
-        <label className="check-row"><input type="checkbox" checked={profile.motion} onChange={e => setProfile({ ...profile, motion: e.target.checked })} /> ขยับตัวละครเมื่อพูด <span className="muted">(PNGtuber)</span></label>
+
         <p className="micro">รูปที่เลือกจะแสดงให้เพื่อนในห้องเห็น</p>
         {error && <p role="alert" className="notice">{error}</p>}
         <div className="profile-actions">{onCancel && <button className="btn secondary" type="button" onClick={onCancel}>ยกเลิก</button>}<button className="btn primary grow" disabled={loading}>{label} ↗</button></div>
